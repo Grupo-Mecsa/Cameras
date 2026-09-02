@@ -1,0 +1,62 @@
+{
+  // Configuraciones de depuración de DeCam.
+  // F5 lanza la que esté seleccionada en el desplegable de "Ejecutar y depurar".
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DeCam: interfaz gráfica",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/app.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "DeCam: GUI + entrar en librerías (ultralytics/cv2)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/app.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      // Permite poner puntos de interrupción dentro de ultralytics, torch y cv2.
+      "justMyCode": false,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "DeCam: archivo actual",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      "name": "DeCam: compilar .exe",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_exe.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      "name": "DeCam: adjuntar a proceso en marcha",
+      // Útil para enganchar un análisis que ya está corriendo.
+      // Requiere haber añadido debugpy.listen(5678) en el código.
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678
+      },
+      "justMyCode": true
+    }
+  ]
+}

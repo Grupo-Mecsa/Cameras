@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "DeCam: instalar dependencias",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt",
+      "problemMatcher": []
+    },
+    {
+      "label": "DeCam: descargar modelos de rostros",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe descargar_modelos.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "DeCam: compilar .exe",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe build_exe.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "DeCam: ejecutar sin depurar",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe app.py",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}

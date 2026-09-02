@@ -1,0 +1,329 @@
+# DeCam — Detección de personas en la puerta
+
+Aplicación de escritorio (Python + Tkinter) que analiza grabaciones de cámaras de
+seguridad con YOLOv8 y reporta **en qué momentos una persona se acerca a una puerta**.
+
+## Características
+
+- Selección de una carpeta con videos (`.mp4`, `.avi`, `.mkv`), **incluyendo
+  subcarpetas** (las exportaciones de NVR crean una carpeta por descarga).
+- Vista previa **navegable frame a frame** (deslizador, salto por número de frame o
+  por tiempo) para elegir la imagen de referencia y **dibujar la zona de la puerta
+  con el mouse**.
+- Detección de personas (clase `person` de COCO) con YOLOv8 (`n` / `s` / `m`).
+- **Dos clasificaciones en paralelo**: detecciones dentro de la zona de la puerta
+  y detecciones generales en cualquier punto del frame.
+- **Detección de rostros opcional** dentro de cada persona detectada, con recortes
+  guardados aparte.
+- **Identificación opcional** de personas conocidas con SFace, a partir de un
+  catálogo de fotos de referencia.
+- **Aceleración automática**: GPU NVIDIA (CUDA), GPU Intel integrada
+  (OpenVINO) o CPU, lo mejor que haya en el equipo.
+- Agrupación de detecciones consecutivas en intervalos con tolerancia configurable.
+- Análisis en un hilo aparte: la ventana no se congela, con barra de progreso y log.
+- Resultados: `eventos.csv` + miniaturas JPG con la persona y la zona dibujadas.
+- La configuración se guarda en `config.json` y se restaura al abrir.
+
+## Requisitos
+
+- Python 3.9 o superior (recomendado 3.10+).
+- Tkinter (incluido en el instalador oficial de Python para Windows).
+
+## Instalación
+
+```bash
+cd DeCam
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux / macOS
+pip install -r requirements.txt
+```
+
+La primera vez que se ejecute un análisis, `ultralytics` descarga
+automáticamente los pesos del modelo elegido (`yolov8n.pt`, etc.).
+
+## Aceleración por GPU
+
+El desplegable **Acelerador** solo ofrece lo que el equipo puede usar de verdad.
+El valor `auto` elige la mejor opción disponible por este orden:
+
+| Acelerador | Hardware | Cómo se habilita |
+|------------|----------|------------------|
+| `cuda` | GPU NVIDIA | instalar PyTorch con CUDA (ver abajo) |
+| `openvino-gpu` | **GPU Intel integrada** (Iris Xe, UHD, Arc) | ya incluido: `openvino` está en `requirements.txt` |
+| `cpu` | cualquiera | siempre disponible |
+
+### GPU Intel integrada (OpenVINO)
+
+Es la vía útil en portátiles sin tarjeta dedicada, que es la mayoría. No hay nada
+que configurar: si OpenVINO detecta la GPU, `auto` la usa. La primera vez, la app
+exporta el modelo a formato OpenVINO (unos segundos) y guarda el resultado en
+`yolov8n_openvino_model/` para las siguientes.
+
+Medido en un i5-1145G7 con Iris Xe, yolov8n a 640 px:
+
+| | ms/frame | Proyección para 65 h de video a 1 fps |
+|---|---|---|
+| PyTorch CPU | 68 | 4.4 h |
+| OpenVINO CPU | 116 | 7.5 h |
+| **OpenVINO GPU (Iris Xe)** | **24** | **1.5 h** |
+
+Un análisis completo de un clip de 90 s pasó de 12.3 s a 5.2 s (**2.4x**), con
+resultados idénticos. Nótese que *OpenVINO CPU* es **más lento** que PyTorch CPU:
+por eso no se ofrece esa combinación.
+
+### GPU NVIDIA (CUDA)
+
+Con solo `pip install -r requirements.txt` se instala PyTorch en versión CPU.
+Para usar una GPU NVIDIA, instala la build con CUDA (ver <https://pytorch.org>):
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+Aparecerá `cuda` en el desplegable y `auto` la preferirá sobre la GPU Intel.
+
+### Dónde se va el tiempo
+
+Medido sobre grabaciones 1080p H.265 a 30 fps analizadas a 1 fps: la
+decodificación va a unos 700 frames/s y supone ~2.8 h por cada 65 h de material;
+el resto es inferencia. Es decir, **el cuello de botella es el modelo, no leer el
+video**: bajar de `yolov8m` a `yolov8n` o activar la GPU se nota; analizar menos
+frames por segundo, también.
+
+## Uso
+
+```bash
+python app.py
+```
+
+1. **Seleccionar carpeta**: elige la carpeta con las grabaciones. Se muestra la ruta
+   y cuántos videos se encontraron.
+2. **Seleccionar carpeta de salida**: dónde se escribirán los resultados.
+3. En **Video de referencia** elige de qué video tomar la vista previa.
+4. **Elige el frame concreto** que quieras usar de referencia:
+   - arrastra el **deslizador** bajo la imagen (el salto se aplica al soltar);
+   - usa `<<` / `<` / `>` / `>>` para moverte 300 o 30 frames;
+   - escribe un **número de frame** y pulsa Enter;
+   - o escribe un tiempo en **`HH:MM:SS`** (también valen `MM:SS` o segundos sueltos)
+     y pulsa **Ir**.
+
+   A la derecha se muestran el tiempo actual, la duración, la resolución y los FPS.
+5. Sobre la imagen, **haz clic y arrastra** para dibujar el rectángulo de la puerta.
+   Las coordenadas se convierten automáticamente a la resolución real del video.
+6. Ajusta los parámetros:
+   - **Frames por segundo a analizar** (por defecto `1`): más FPS = más precisión y
+     más tiempo de proceso.
+   - **Tolerancia (segundos)** (por defecto `3`): cuánto silencio se permite entre
+     dos detecciones antes de cerrar el evento.
+   - **Modelo YOLO**: `yolov8n` (rápido) → `yolov8m` (más preciso, más lento).
+   - **Acelerador**: `auto` salvo que quieras forzar CPU o una GPU concreta.
+   - **Criterio de zona** y **Solape mín.**: ver la sección siguiente.
+   - **Registrar también detecciones generales**: añade al CSV las personas
+     vistas fuera de la zona.
+   - **Detectar rostros** (opcional): ver la sección siguiente.
+7. Pulsa **Iniciar análisis**. Puedes **Cancelar** en cualquier momento.
+8. Al terminar, usa **Abrir carpeta de resultados**.
+
+## Clasificación de las detecciones
+
+Cada detección se clasifica en uno de dos tipos, que conviven en el mismo CSV en
+la columna `tipo`:
+
+| Tipo | Qué es |
+|------|--------|
+| `zona` | La persona cumple el criterio de la zona de la puerta. |
+| `general` | Cualquier persona vista en el frame, esté donde esté. |
+
+Las detecciones generales se registran si está marcada la casilla *Registrar
+también detecciones generales*. Sirven de control: si un tramo tiene muchos
+eventos `general` y ninguno `zona`, es que pasa gente pero no se acerca a la
+puerta.
+
+### Criterio de zona (esto es lo que evita los falsos positivos)
+
+En un pasillo, la caja de alguien que camina por el centro puede **rozar la
+esquina** de una puerta lejana por pura perspectiva, sin que la persona esté ni
+cerca de ella. Por eso el solape simple da falsos positivos, y no es el criterio
+por defecto:
+
+| Criterio | Cuenta como "en la zona" cuando... | Cuándo usarlo |
+|----------|------------------------------------|---------------|
+| **`pies`** (por defecto) | el punto de apoyo (centro del borde inferior de la caja) cae dentro de la zona | zona dibujada sobre el suelo o el vano que se pisa. El más fiable |
+| `centro` | el centro de la caja cae dentro de la zona | zonas altas, como una ventanilla o un mostrador |
+| `solape` | al menos *Solape mín.* del área de la persona está dentro de la zona | zonas grandes donde la persona entra de lado |
+
+Ejemplo medido sobre una captura real de pasillo: la caja de una persona a media
+distancia solapaba la zona de la puerta del fondo en apenas un **1.7 % de su
+área**. El criterio antiguo (cualquier solape) lo daba por bueno; los tres
+criterios actuales lo descartan.
+
+## Detección de rostros
+
+Es **opcional** y se activa con la casilla *Detectar rostros*. Solo se busca dentro
+de la **mitad superior de la caja de cada persona ya detectada**, lo que la hace
+rápida y reduce falsos positivos.
+
+Dos backends:
+
+| Backend | Requiere | Calidad |
+|---------|----------|---------|
+| `haar`  | nada, viene con `opencv-python` | solo rostros bastante frontales y grandes |
+| `yunet` | el ONNX (ver abajo) | bastante mejor con ángulos y rostros pequeños |
+
+Los modelos se descargan con:
+
+```powershell
+python descargar_modelos.py
+```
+
+Si faltan, la app avisa en el log y sigue analizando personas sin rostros. El
+desplegable *Backend* solo ofrece los backends que tu instalación puede usar
+realmente.
+
+> **OpenCV 5 eliminó `cv2.CascadeClassifier`** y ya no distribuye las cascadas
+> Haar, así que en esas versiones el único backend disponible es `yunet`.
+
+## Identificación de personas
+
+Sobre la detección de rostros, la casilla *Identificar personas conocidas* compara
+cada rostro contra un catálogo usando **SFace** (`cv2.FaceRecognizerSF`): convierte
+el rostro alineado en un vector de 128 dimensiones y lo compara por similitud
+coseno. Requiere el backend `yunet`, porque la alineación usa sus puntos faciales.
+
+El catálogo es una carpeta con **una subcarpeta por persona**; el nombre de la
+subcarpeta es la etiqueta que sale en el CSV:
+
+```
+personas/
+├── ana_torres/
+│   ├── 1.jpg
+│   └── 2.jpg
+└── juan_perez/
+    └── frente.jpg
+```
+
+Cuantas más fotos por persona (distintos ángulos e iluminaciones), mejor. Se toma
+la cara más grande de cada foto. Si ninguna referencia supera el umbral de
+similitud (`0.363`, el que recomienda OpenCV), el rostro queda como
+`desconocido` y no aparece en la columna `personas`.
+
+> **Requisitos reales para que funcione.** Medido sobre grabaciones de pasillo a
+> 1080p: con el rostro a **115x176 px** el reconocimiento acierta, pero a
+> **99x113 px o menos** la similitud se desploma por debajo del umbral aunque sea
+> la misma persona, por desenfoque de movimiento y poca luz. En la práctica hace
+> falta la cara **frontal, nítida y de al menos ~120 px de alto**, lo que implica
+> una cámara cerca de la puerta y a la altura de la cabeza. En una cámara de
+> pasillo montada en alto, la mayoría de eventos quedarán como `desconocido`.
+
+Los datos biométricos están regulados (RGPD y equivalentes locales): usar esta
+función sobre personas identificables suele exigir base legal, información previa
+y un plazo de conservación definido.
+
+## Salida
+
+```
+<carpeta de salida>/
+├── eventos.csv
+├── miniaturas/
+│   ├── zona/                       eventos dentro de la zona de la puerta
+│   │   └── camara1_00-01-24.jpg
+│   └── general/                    resto de detecciones de personas
+│       └── camara1_00-03-02.jpg
+└── rostros/                        (solo si se activa la detección de rostros)
+    ├── zona/
+    └── general/
+        ├── camara1_00-03-02_frame.jpg   frame completo con los rostros marcados
+        └── camara1_00-03-02_rostro1.jpg
+```
+
+`eventos.csv` (UTF-8 con BOM, se abre bien en Excel):
+
+| archivo      | tipo    | inicio   | fin      | duracion_segundos | rostros | personas   |
+|--------------|---------|----------|----------|-------------------|---------|------------|
+| camara1.mp4  | zona    | 00:01:24 | 00:01:39 | 15.00             | 1       | ana_torres |
+| camara1.mp4  | general | 00:03:02 | 00:03:11 | 9.00              | 1       |            |
+
+Cada miniatura es el primer frame del evento con la **zona de la puerta** en azul y
+la **caja de la persona** en verde. La columna `rostros` es el **máximo de rostros
+vistos a la vez** durante el evento, y los recortes salen del frame del evento donde
+más rostros se detectaron (que no tiene por qué ser el de la miniatura). La
+columna `personas` lista las personas del catálogo reconocidas durante el evento.
+
+## Generar el ejecutable (.exe)
+
+```powershell
+pip install pyinstaller
+python build_exe.py
+```
+
+Queda en `dist\DeCam\DeCam.exe` (carpeta distribuible completa). Con `--onefile`
+se genera un único `.exe`, pero **no es recomendable**: con PyTorch dentro supera
+1 GB y tarda casi un minuto en arrancar cada vez, porque se descomprime en una
+carpeta temporal.
+
+Notas:
+
+- El build pesa **1–3 GB** según si tienes PyTorch CPU o CUDA. Es normal.
+- Compila en la misma arquitectura de destino: un `.exe` solo corre en Windows.
+- Si ya descargaste los pesos (`yolov8n.pt`) o el ONNX de YuNet en `models/`, el
+  script los empaqueta y el ejecutable funciona **sin internet**. Si no, la primera
+  ejecución intentará descargar los pesos.
+- Windows Defender / SmartScreen suele marcar ejecutables de PyInstaller sin firmar.
+  Para distribuirlo fuera de tu equipo necesitarías un certificado de firma de código.
+- Para depurar un `.exe` que se cierra al instante, recompila con `--console` y
+  lánzalo desde una terminal para ver el error.
+
+## Estructura del proyecto
+
+| Archivo            | Contenido                                                        |
+|--------------------|------------------------------------------------------------------|
+| `app.py`           | Interfaz Tkinter y orquestación del hilo de análisis.             |
+| `detector.py`      | Detección de personas y rostros, eventos, CSV, miniaturas.        |
+| `build_exe.py`     | Compila la app a `.exe` con PyInstaller.                          |
+| `descargar_modelos.py` | Baja los ONNX de rostros de OpenCV Zoo.                       |
+| `.vscode/`         | Configuración de depuración y tareas de VS Code.                  |
+| `requirements.txt` | Dependencias.                                                     |
+| `models/`          | ONNX de YuNet y SFace (los baja `descargar_modelos.py`).          |
+| `config.json`      | Se genera solo: última carpeta, zona y parámetros.                |
+
+## Notas y ajustes
+
+- Un video que no se pueda abrir se salta: el error queda en el log y en el resumen,
+  y el análisis continúa con el siguiente.
+- Los tiempos del CSV son **relativos al inicio de cada video**, no la hora del reloj.
+  En exportaciones tipo `..._20260825050744_20260825070843_427095.mp4` la hora real
+  del evento es el timestamp inicial del nombre + el tiempo del CSV.
+- Los `.jpg` que algunos NVR dejan junto a cada `.mp4` se ignoran: solo se leen
+  las extensiones de video.
+- El umbral de confianza (`0.35`) está en `ConfiguracionAnalisis.confianza`
+  en [detector.py](detector.py); súbelo si hay falsos positivos, bájalo si se
+  escapan personas.
+- La zona guardada corresponde a la resolución de la cámara con la que se dibujó.
+  Si mezclas cámaras con resoluciones distintas, redibuja la zona para cada tanda.
+
+## Depurar en VS Code
+
+La carpeta `.vscode/` ya viene configurada. Abre la carpeta del proyecto en VS Code
+y comprueba abajo a la derecha que el intérprete es `.venv` (si no,
+`Ctrl+Shift+P` → *Python: Select Interpreter*).
+
+En **Ejecutar y depurar** (`Ctrl+Shift+D`) tienes:
+
+| Configuración | Para qué |
+|---------------|----------|
+| **DeCam: interfaz gráfica** | El día a día. `F5` y a poner breakpoints en `app.py` / `detector.py`. |
+| **DeCam: GUI + entrar en librerías** | Igual pero con `justMyCode: false`, para meterse dentro de `ultralytics`, `torch` o `cv2`. |
+| **DeCam: archivo actual** | Ejecuta el archivo abierto. |
+| **DeCam: compilar .exe** | Lanza `build_exe.py` bajo el depurador. |
+| **DeCam: adjuntar a proceso** | Se engancha a un análisis ya en marcha; requiere añadir `debugpy.listen(5678)` en el código. |
+
+Tareas (`Ctrl+Shift+P` → *Tasks: Run Task*): instalar dependencias, descargar los
+modelos de rostros, compilar el `.exe` y ejecutar sin depurar.
+
+Un par de detalles al depurar esta app:
+
+- El análisis corre en un hilo aparte. Un breakpoint dentro de `AnalizadorPuerta`
+  detiene **ese** hilo; la ventana sigue respondiendo pero el progreso se congela.
+- `Records/`, `output/`, `dist/` y `.venv/` están excluidos de la búsqueda y del
+  watcher en `settings.json`: con 20 GB de video, indexarlos ralentiza el editor.

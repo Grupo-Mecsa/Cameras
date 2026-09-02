@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ------------------------------------------------------------ Entorno virtual
+.venv/
+venv/
+env/
+ENV/
+
+# ------------------------------------------------- Grabaciones y resultados
+# El material de video son decenas de GB: nunca debe entrar en el repositorio.
+Records/
+records/
+grabaciones/
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# Salida del análisis (CSV, miniaturas, recortes de rostros).
+output/
+salida/
+resultados/
+
+# ------------------------------------------------------------------ Modelos
+# Se descargan solos: los pesos YOLO por ultralytics y los ONNX con
+# 'python descargar_modelos.py'. Pesan decenas de MB y no aportan al historial.
+*.pt
+*.onnx
+models/
+*_openvino_model/
+
+# -------------------------------------------------------------- Datos personales
+# Fotos de referencia para identificar personas: son datos biométricos.
+# No deben versionarse ni salir del equipo.
+personas/
+catalogo_personas/
+
+# ------------------------------------------------------ Configuración local
+# Guarda rutas absolutas y la zona de la puerta de ESTE equipo.
+config.json
+
+# ------------------------------------------------------------- Empaquetado
+build/
+dist/
+*.spec
+
+# --------------------------------------------------------------- Editores
+# El resto de .vscode/ (launch, tasks, settings, extensions) sí se versiona:
+# es la configuración compartida del proyecto.
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# ------------------------------------------------------------------- Sistema
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
