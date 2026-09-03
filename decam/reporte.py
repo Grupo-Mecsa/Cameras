@@ -68,9 +68,8 @@ def _duracion_larga(segundos: float) -> str:
 
 def _parametros(config: ConfiguracionAnalisis) -> list[tuple[str, str]]:
     """Describe la configuración usada, para dejar constancia en el informe."""
-    x1, y1, x2, y2 = config.zona_puerta
     filas = [
-        ("Zona de la puerta", f"({x1}, {y1}) - ({x2}, {y2})"),
+        ("Zona de la puerta", str(config.zona)),
         ("Criterio de zona", config.criterio_zona),
         ("Frames por segundo analizados", f"{config.fps_analisis:g}"),
         ("Tolerancia de agrupación", f"{config.tolerancia_segundos:g} s"),

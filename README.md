@@ -109,7 +109,13 @@ python app.py
      y pulsa **Ir**.
 
    A la derecha se muestran el tiempo actual, la duración, la resolución y los FPS.
-5. Sobre la imagen, **haz clic y arrastra** para dibujar el rectángulo de la puerta.
+5. Sobre la imagen, dibuja la zona de la puerta. Hay dos modos, junto al desplegable:
+   - **Rectángulo**: haz clic y arrastra.
+   - **Polígono**: haz clic en cada esquina y cierra con doble clic o clic derecho
+     (Esc descarta el que está a medias). Es lo que conviene cuando la cámara ve
+     la puerta en perspectiva y el vano o el suelo delante no son un rectángulo
+     en la imagen; el criterio `pies` funciona igual con un trapecio dibujado
+     sobre el suelo.
    Las coordenadas se convierten automáticamente a la resolución real del video.
 6. Ajusta los parámetros:
    - **Frames por segundo a analizar** (por defecto `1`): más FPS = más precisión y

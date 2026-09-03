@@ -26,6 +26,7 @@ from decam.ui.tabla_eventos import TablaEventos
 from decam.ui.utilidades import abrir_en_sistema
 from decam.ui.vista_previa import VistaPrevia
 from decam.video import encontrar_videos
+from decam.zona import espec_a_lista, normalizar_espec
 
 
 class AplicacionDeCam(ttk.Frame):
@@ -74,8 +75,13 @@ class AplicacionDeCam(ttk.Frame):
 
         self.pestanas = ttk.Notebook(cuerpo)
         self.pestanas.pack(side="left", fill="both", expand=True)
-        zona_inicial = tuple(self.prefs.zona_puerta) if self.prefs.zona_puerta else None
-        self.vista = VistaPrevia(self.pestanas, on_log=self.log, zona_inicial=zona_inicial)  # type: ignore[arg-type]
+        zona_inicial = None
+        if self.prefs.zona_puerta:
+            try:
+                zona_inicial = normalizar_espec(self.prefs.zona_puerta)
+            except ValueError as exc:
+                registro.log.warning("Zona guardada inválida, se descarta: %s", exc)
+        self.vista = VistaPrevia(self.pestanas, on_log=self.log, zona_inicial=zona_inicial)
         self.pestanas.add(self.vista, text="  Vista previa  ")
         self.tabla = TablaEventos(self.pestanas)
         self.pestanas.add(self.tabla, text="  Eventos  ")
@@ -416,7 +422,7 @@ class AplicacionDeCam(ttk.Frame):
     def _guardar_preferencias(self) -> None:
         """Vuelca los valores actuales de la interfaz a ``config.json``."""
         self.panel.volcar_en(self.prefs)
-        self.prefs.zona_puerta = list(self.vista.zona) if self.vista.zona else None
+        self.prefs.zona_puerta = espec_a_lista(self.vista.zona) if self.vista.zona else None
         self.prefs.guardar()
 
     def _al_cerrar(self) -> None:

@@ -27,6 +27,12 @@ class TestPreferencias:
         prefs.guardar(destino)
         assert Preferencias.cargar(destino) == prefs
 
+    def test_zona_poligonal_ida_y_vuelta(self, tmp_path):
+        destino = tmp_path / "config.json"
+        prefs = Preferencias(zona_puerta=[[10, 20], [30, 20], [20, 40]])
+        prefs.guardar(destino)
+        assert Preferencias.cargar(destino).zona_puerta == [[10, 20], [30, 20], [20, 40]]
+
     def test_fichero_ausente_da_defaults(self, tmp_path):
         assert Preferencias.cargar(tmp_path / "nada.json") == Preferencias()
 

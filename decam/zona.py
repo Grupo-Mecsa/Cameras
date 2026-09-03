@@ -1,24 +1,36 @@
 """La zona de la puerta y los criterios para decidir si una persona está en ella.
 
 :class:`Zona` es lo único que el resto del análisis conoce: un lugar del frame
-que sabe si contiene un punto y qué fracción de una caja cae dentro. Hoy la
-única implementación es :class:`ZonaRectangular`; una zona poligonal encajaría
-implementando el mismo protocolo sin tocar los criterios ni el analizador.
+que sabe si contiene un punto y qué fracción de una caja cae dentro. Hay dos
+implementaciones, :class:`ZonaRectangular` y :class:`ZonaPoligonal`; ni los
+criterios ni el analizador distinguen entre ellas.
+
+La zona se persiste (config, preferencias, manifiesto) como un dato plano, la
+*especificación*: cuatro enteros para un rectángulo o una secuencia de pares
+para un polígono. :func:`normalizar_espec` la canoniza y :func:`zona_desde` la
+convierte en objeto.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, Union
 
 import cv2
+import numpy as np
 
 #: Caja ``(x1, y1, x2, y2)``.
 Caja = tuple[float, float, float, float]
 Punto = tuple[float, float]
 
+#: Especificación persistible de una zona: rectángulo o lista de vértices.
+EspecZona = Union[tuple[int, int, int, int], tuple[tuple[int, int], ...]]
+
 #: Criterios para decidir si una persona "está" en la zona.
 CRITERIOS_ZONA = ("pies", "centro", "solape")
+
+COLOR_ZONA_BGR = (255, 0, 0)
 
 
 class Zona(Protocol):
@@ -37,8 +49,16 @@ class Zona(Protocol):
         """Pinta la zona sobre una imagen BGR (para miniaturas)."""
 
 
+# ------------------------------------------------------------- especificación
+
+
+def es_poligono(espec: Sequence) -> bool:
+    """``True`` si la especificación es una lista de vértices y no un rectángulo."""
+    return len(espec) > 0 and isinstance(espec[0], (tuple, list))
+
+
 def normalizar_zona(zona: Sequence[float]) -> tuple[int, int, int, int]:
-    """Ordena y redondea una zona a ``(x1, y1, x2, y2)`` con enteros."""
+    """Ordena y redondea un rectángulo a ``(x1, y1, x2, y2)`` con enteros."""
     x1, y1, x2, y2 = zona
     return (
         int(round(min(x1, x2))),
@@ -46,6 +66,46 @@ def normalizar_zona(zona: Sequence[float]) -> tuple[int, int, int, int]:
         int(round(max(x1, x2))),
         int(round(max(y1, y2))),
     )
+
+
+def normalizar_espec(datos: Sequence) -> EspecZona:
+    """Canoniza lo que venga de JSON o de la interfaz.
+
+    Returns:
+        Una tupla de cuatro enteros (rectángulo) o una tupla de pares de
+        enteros (polígono).
+
+    Raises:
+        ValueError: si no tiene forma de zona.
+    """
+    if len(datos) == 0:
+        raise ValueError("La zona está vacía.")
+    if es_poligono(datos):
+        puntos = tuple((int(round(p[0])), int(round(p[1]))) for p in datos)
+        if len(puntos) < 3:
+            raise ValueError("Un polígono necesita al menos tres puntos.")
+        return puntos
+    if len(datos) != 4:
+        raise ValueError("Un rectángulo son cuatro coordenadas.")
+    return normalizar_zona(datos)
+
+
+def espec_a_lista(espec: EspecZona) -> list:
+    """Forma serializable en JSON de una especificación."""
+    if es_poligono(espec):
+        return [list(p) for p in espec]  # type: ignore[union-attr]
+    return list(espec)
+
+
+def zona_desde(datos: Sequence) -> "Zona":
+    """Construye la zona que corresponda a una especificación."""
+    espec = normalizar_espec(datos)
+    if es_poligono(espec):
+        return ZonaPoligonal(espec)  # type: ignore[arg-type]
+    return ZonaRectangular(*espec)  # type: ignore[misc]
+
+
+# ------------------------------------------------------------------ rectángulo
 
 
 @dataclass(frozen=True)
@@ -99,15 +159,95 @@ class ZonaRectangular:
         return self.area_solapada(caja) / float(ancho * alto)
 
     def dibujar(self, imagen) -> None:
-        color = (255, 0, 0)
-        cv2.rectangle(imagen, (self.x1, self.y1), (self.x2, self.y2), color, 2)
-        cv2.putText(
-            imagen, "puerta", (self.x1, max(15, self.y1 - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
-        )
+        cv2.rectangle(imagen, (self.x1, self.y1), (self.x2, self.y2), COLOR_ZONA_BGR, 2)
+        _etiqueta(imagen, (self.x1, self.y1))
 
     def __str__(self) -> str:
         return f"({self.x1}, {self.y1}) - ({self.x2}, {self.y2})"
+
+
+# -------------------------------------------------------------------- polígono
+
+
+@dataclass(frozen=True)
+class ZonaPoligonal:
+    """Un polígono cualquiera (simple, sin cruces), en píxeles del frame.
+
+    Es lo que hace falta cuando la cámara ve la puerta en perspectiva: el vano
+    o el tramo de suelo delante de él no es un rectángulo en la imagen.
+    """
+
+    puntos: tuple[tuple[int, int], ...]
+
+    @classmethod
+    def desde(cls, puntos: Sequence[Sequence[float]]) -> "ZonaPoligonal":
+        return cls(tuple((int(round(x)), int(round(y))) for x, y in puntos))
+
+    @property
+    def como_tupla(self) -> tuple[tuple[int, int], ...]:
+        return self.puntos
+
+    @property
+    def caja_envolvente(self) -> tuple[int, int, int, int]:
+        xs = [p[0] for p in self.puntos]
+        ys = [p[1] for p in self.puntos]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def _contorno(self) -> np.ndarray:
+        return np.array(self.puntos, dtype=np.int32).reshape(-1, 1, 2)
+
+    def validar(self) -> None:
+        if len(self.puntos) < 3:
+            raise ValueError("La zona de la puerta necesita al menos tres puntos.")
+        if cv2.contourArea(self._contorno()) <= 0:
+            raise ValueError("La zona de la puerta no es válida (puntos alineados).")
+
+    def contiene_punto(self, punto: Punto) -> bool:
+        x, y = punto
+        return cv2.pointPolygonTest(self._contorno(), (float(x), float(y)), False) >= 0
+
+    def fraccion_de(self, caja: Caja) -> float:
+        """Fracción de la caja dentro del polígono, por rasterizado.
+
+        Se pinta el polígono en una máscara del tamaño de la intersección entre
+        la caja y la caja envolvente del polígono y se cuentan los píxeles: es
+        exacto a ±1 px, que sobra para un umbral de solape.
+        """
+        x1, y1, x2, y2 = caja
+        ancho = x2 - x1
+        alto = y2 - y1
+        if ancho <= 0 or alto <= 0:
+            return 0.0
+        bx1, by1, bx2, by2 = self.caja_envolvente
+        ix1, iy1 = max(x1, bx1), max(y1, by1)
+        ix2, iy2 = min(x2, bx2), min(y2, by2)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0.0
+
+        ox, oy = int(math.floor(ix1)), int(math.floor(iy1))
+        mascara = np.zeros(
+            (int(math.ceil(iy2)) - oy, int(math.ceil(ix2)) - ox), dtype=np.uint8
+        )
+        desplazado = self._contorno() - np.array([ox, oy], dtype=np.int32)
+        cv2.fillPoly(mascara, [desplazado], 1)
+        return cv2.countNonZero(mascara) / float(ancho * alto)
+
+    def dibujar(self, imagen) -> None:
+        cv2.polylines(imagen, [self._contorno()], True, COLOR_ZONA_BGR, 2)
+        _etiqueta(imagen, min(self.puntos, key=lambda p: (p[1], p[0])))
+
+    def __str__(self) -> str:
+        return f"polígono de {len(self.puntos)} puntos"
+
+
+def _etiqueta(imagen, punto: tuple[int, int]) -> None:
+    cv2.putText(
+        imagen, "puerta", (punto[0], max(15, punto[1] - 6)),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_ZONA_BGR, 1, cv2.LINE_AA,
+    )
+
+
+# ------------------------------------------------------------------- criterios
 
 
 def punto_pies(caja: Caja) -> Punto:

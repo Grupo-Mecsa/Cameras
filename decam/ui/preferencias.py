@@ -19,7 +19,8 @@ class Preferencias:
 
     carpeta_videos: str = ""
     carpeta_salida: str = ""
-    zona_puerta: Optional[list[int]] = None
+    #: ``[x1, y1, x2, y2]`` (rectángulo) o ``[[x, y], ...]`` (polígono).
+    zona_puerta: Optional[list] = None
     fps_analisis: float = 1.0
     tolerancia_segundos: float = 3.0
     modelo: str = "yolov8n"

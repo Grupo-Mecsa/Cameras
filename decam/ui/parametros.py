@@ -10,7 +10,7 @@ from decam.aceleradores import aceleradores_disponibles
 from decam.configuracion import ConfiguracionAnalisis
 from decam.rostros import backends_rostros_disponibles
 from decam.ui.preferencias import Preferencias
-from decam.zona import CRITERIOS_ZONA
+from decam.zona import CRITERIOS_ZONA, EspecZona
 
 MODELOS = ("yolov8n", "yolov8s", "yolov8m")
 
@@ -306,9 +306,7 @@ class PanelParametros(ttk.Frame):
         """Muestra bajo el botón qué catálogo de personas está elegido."""
         self.var_personas.set(texto)
 
-    def configuracion(
-        self, zona: tuple[int, int, int, int], carpeta_personas: str
-    ) -> ConfiguracionAnalisis:
+    def configuracion(self, zona: EspecZona, carpeta_personas: str) -> ConfiguracionAnalisis:
         """Arma y valida la configuración a partir de los widgets.
 
         Raises:

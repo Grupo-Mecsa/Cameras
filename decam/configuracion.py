@@ -7,19 +7,20 @@ from dataclasses import dataclass
 from decam.aceleradores import ACELERADORES
 from decam.movimiento import UMBRAL_MOVIMIENTO
 from decam.rostros import UMBRAL_SFACE
-from decam.zona import CRITERIOS_ZONA, ZonaRectangular
+from decam.zona import CRITERIOS_ZONA, EspecZona, Zona, zona_desde
 
 
 @dataclass
 class ConfiguracionAnalisis:
     """Parámetros con los que se ejecuta el análisis.
 
-    ``zona_puerta`` se guarda como tupla para que la configuración sea un dato
-    plano (se serializa tal cual en el manifiesto); :attr:`zona` la convierte
-    en el objeto que usa el análisis.
+    ``zona_puerta`` se guarda como dato plano —cuatro enteros para un
+    rectángulo o una tupla de pares para un polígono— para que la configuración
+    se serialice tal cual en el manifiesto; :attr:`zona` la convierte en el
+    objeto que usa el análisis.
     """
 
-    zona_puerta: tuple[int, int, int, int]
+    zona_puerta: EspecZona
     fps_analisis: float = 1.0
     tolerancia_segundos: float = 3.0
     modelo: str = "yolov8n"
@@ -43,9 +44,9 @@ class ConfiguracionAnalisis:
     usar_tracking: bool = True
 
     @property
-    def zona(self) -> ZonaRectangular:
-        """La zona de la puerta como objeto."""
-        return ZonaRectangular.desde(self.zona_puerta)
+    def zona(self) -> Zona:
+        """La zona de la puerta como objeto (rectángulo o polígono)."""
+        return zona_desde(self.zona_puerta)
 
     def validar(self) -> None:
         """Verifica que los parámetros sean utilizables.
