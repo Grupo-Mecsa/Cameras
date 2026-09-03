@@ -5,10 +5,11 @@ from __future__ import annotations
 import importlib
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
-import registro
+from decam import registro
 
 
 @pytest.fixture
@@ -44,7 +45,9 @@ def congelar(monkeypatch, exe_dir, localappdata):
 class TestCarpetaDatos:
     def test_en_desarrollo_es_la_raiz_del_proyecto(self, modulo):
         assert not modulo.congelado()
-        assert modulo.carpeta_datos() == modulo.Path(modulo.__file__).parent
+        raiz = Path(modulo.__file__).resolve().parent.parent
+        assert modulo.carpeta_datos() == raiz
+        assert (raiz / "app.py").is_file(), "la raíz es donde vive app.py"
         assert modulo.ruta_config().name == "config.json"
 
     def test_congelado_usa_localappdata_y_la_crea(self, modulo, monkeypatch, tmp_path):

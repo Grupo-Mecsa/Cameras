@@ -7,24 +7,25 @@ import csv
 import numpy as np
 import pytest
 
-from detector import (
+from decam.configuracion import ConfiguracionAnalisis
+from decam.eventos import (
+    COLUMNAS_CSV,
     TIPO_GENERAL,
     TIPO_ZONA,
-    AnalizadorPuerta,
-    ConfiguracionAnalisis,
     Evento,
     ResultadoVideo,
-    _SeguidorEventos,
-    encontrar_videos,
     formatear_tiempo,
 )
+from decam.salida import escribir_csv
+from decam.seguimiento import SeguidorEventos
+from decam.video import encontrar_videos
 
 FRAME = np.zeros((8, 8, 3), dtype=np.uint8)
 CAJA = (1, 1, 5, 7)
 
 
-def seguidor(tolerancia: float = 3.0) -> _SeguidorEventos:
-    return _SeguidorEventos("cam.mp4", TIPO_ZONA, tolerancia)
+def seguidor(tolerancia: float = 3.0) -> SeguidorEventos:
+    return SeguidorEventos("cam.mp4", TIPO_ZONA, tolerancia)
 
 
 def positivo(seg, segundo, rostros=(), nombres=frozenset()):
@@ -114,7 +115,7 @@ class TestSeguidorEventos:
         assert seg.cerrar() is None  # ya no hay nada abierto
 
     def test_tipo_y_archivo_se_propagan(self):
-        seg = _SeguidorEventos("puerta.avi", TIPO_GENERAL, 1.0)
+        seg = SeguidorEventos("puerta.avi", TIPO_GENERAL, 1.0)
         positivo(seg, 0.0)
         evento = seg.cerrar().evento
         assert evento.archivo == "puerta.avi"
@@ -205,6 +206,9 @@ class TestEvento:
             "direccion": "",
         }
 
+    def test_las_columnas_del_csv_coinciden_con_la_fila(self):
+        assert tuple(Evento("a", 0, 1).a_fila_csv()) == COLUMNAS_CSV
+
     def test_str_incluye_personas_y_direccion_solo_si_aportan(self):
         assert "persona(s)" not in str(Evento("a", 0, 1, n_personas=1))
         con = str(Evento("a", 0, 1, n_personas=3, direccion="2 entran, 1 sale"))
@@ -225,7 +229,7 @@ class TestEscribirCsv:
         r3 = ResultadoVideo(archivo="roto.mp4", error="no abre")
 
         destino = tmp_path / "sub" / "eventos.csv"
-        assert AnalizadorPuerta.escribir_csv([r1, r2, r3], destino) == destino
+        assert escribir_csv([r1, r2, r3], destino) == destino
 
         crudo = destino.read_bytes()
         assert crudo.startswith(b"\xef\xbb\xbf"), "Excel necesita el BOM para el UTF-8"
@@ -263,6 +267,9 @@ class TestConfiguracionValidar:
 
     def test_valida_por_defecto(self):
         self.config().validar()
+
+    def test_zona_como_objeto(self):
+        assert self.config().zona.como_tupla == (0, 0, 10, 10)
 
     @pytest.mark.parametrize(
         "cambio, mensaje",

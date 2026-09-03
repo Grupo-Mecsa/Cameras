@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from detector import UMBRAL_MOVIMIENTO, DetectorMovimiento
+from decam.movimiento import UMBRAL_MOVIMIENTO, DetectorMovimiento
 
 
 def test_el_primer_frame_siempre_cuenta_como_movimiento(frame_negro):

@@ -13,8 +13,8 @@ Dos decisiones de diseño:
 * Se escribe después de cada video, no al final: si el análisis se cancela o se
   cae a mitad, lo ya hecho se conserva.
 
-Este módulo trabaja con diccionarios y no importa nada de ``detector`` para que
-``detector`` pueda importarlo sin ciclos.
+Este módulo trabaja con diccionarios y no importa nada de ``decam.analizador`` para que
+``decam.analizador`` pueda importarlo sin ciclos.
 """
 
 from __future__ import annotations

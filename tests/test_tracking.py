@@ -2,20 +2,15 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
-from ultralytics.engine.results import Boxes
 
-from detector import DIRECCIONES, Deteccion, RastreadorPersonas, _Trayectorias
+from decam.deteccion import Deteccion, DeteccionCruda
+from decam.seguimiento import DIRECCIONES, RastreadorPersonas, Trayectorias
 
 
-def cajas(*xyxy: tuple[float, float, float, float], conf: float = 0.9) -> Boxes:
-    """Construye el ``Boxes`` en numpy que recibe el rastreador."""
-    if not xyxy:
-        datos = np.zeros((0, 6), dtype=np.float32)
-    else:
-        datos = np.array([[*c, conf, 0] for c in xyxy], dtype=np.float32)
-    return Boxes(datos, orig_shape=(1080, 1920))
+def cajas(*xyxy: tuple[int, int, int, int], conf: float = 0.9) -> list[DeteccionCruda]:
+    """Las detecciones de un frame, tal como salen del detector."""
+    return [DeteccionCruda(c, conf) for c in xyxy]
 
 
 A = (100, 100, 200, 400)
@@ -60,7 +55,7 @@ class TestRastreadorPersonas:
         assert r.buffer == RastreadorPersonas.BUFFER_MINIMO
         id_a = r.asignar_ids(cajas(A))[0]
         for _ in range(r.buffer + 2):
-            assert r.asignar_ids(cajas()) == []
+            assert r.asignar_ids([]) == []
         # Tras superar el buffer la pista se descarta: reaparecer da otro id.
         r.asignar_ids(cajas(A))
         nuevo = r.asignar_ids(cajas(mover(A, 5)))[0]
@@ -70,8 +65,8 @@ class TestRastreadorPersonas:
         r = RastreadorPersonas(1.0, 3.0)
         id_a = r.asignar_ids(cajas(A))[0]
         r.asignar_ids(cajas(mover(A, 10)))
-        r.asignar_ids(cajas())  # dos frames sin detectarla
-        r.asignar_ids(cajas())
+        r.asignar_ids([])  # dos frames sin detectarla
+        r.asignar_ids([])
         assert r.asignar_ids(cajas(mover(A, 40)))[0] == id_a
 
     def test_reiniciar_olvida_las_pistas(self):
@@ -91,7 +86,7 @@ class TestRastreadorPersonas:
 
 class TestTrayectorias:
     def test_direcciones_basicas(self):
-        t = _Trayectorias()
+        t = Trayectorias()
         # 1: llega de fuera y desaparece dentro -> entra
         for dentro in (False, False, True, True):
             t.observar(1, dentro)
@@ -109,19 +104,19 @@ class TestTrayectorias:
         ]
 
     def test_pista_que_nunca_toca_la_zona_no_tiene_direccion(self):
-        t = _Trayectorias()
+        t = Trayectorias()
         for _ in range(3):
             t.observar(7, False)
         assert t.direccion(7) is None
         assert t.direccion(99) is None  # desconocida
 
     def test_una_sola_observacion_dentro_es_permanece(self):
-        t = _Trayectorias()
+        t = Trayectorias()
         t.observar(1, True)
         assert t.direccion(1) == "permanece"
 
     def test_resumen_ordena_y_pluraliza(self):
-        t = _Trayectorias()
+        t = Trayectorias()
         for i in (1, 2):
             t.observar(i, False)
             t.observar(i, True)
@@ -131,8 +126,8 @@ class TestTrayectorias:
         assert t.resumen([4, 3, 2, 1]) == "2 entran, 1 sale"
 
     def test_resumen_vacio(self):
-        assert _Trayectorias().resumen([]) == ""
-        assert _Trayectorias().resumen([1, 2]) == ""
+        assert Trayectorias().resumen([]) == ""
+        assert Trayectorias().resumen([1, 2]) == ""
 
     def test_tabla_de_direcciones_cubre_los_cuatro_casos(self):
         assert set(DIRECCIONES) == {(a, b) for a in (False, True) for b in (False, True)}

@@ -14,14 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence
 
-from detector import (
-    TIPO_GENERAL,
-    TIPO_ZONA,
-    ConfiguracionAnalisis,
-    Evento,
-    ResultadoVideo,
-    formatear_tiempo,
-)
+from decam.configuracion import ConfiguracionAnalisis
+from decam.eventos import TIPO_GENERAL, TIPO_ZONA, Evento, ResultadoVideo, formatear_tiempo
 
 #: Ancho al que se incrustan las miniaturas en el informe.
 ANCHO_MINIATURA = 320

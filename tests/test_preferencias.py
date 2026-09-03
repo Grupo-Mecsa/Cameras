@@ -1,6 +1,6 @@
 """Persistencia de preferencias y parseo de tiempos de la interfaz.
 
-Importar ``app`` carga Tkinter pero no abre ninguna ventana.
+Importar ``decam.ui`` carga Tkinter pero no abre ninguna ventana.
 """
 
 from __future__ import annotations
@@ -9,9 +9,9 @@ import json
 
 import pytest
 
-import app
-import registro
-from app import AplicacionDeCam, Preferencias
+from decam import registro
+from decam.ui.preferencias import RUTA_CONFIG, Preferencias
+from decam.ui.utilidades import parsear_tiempo
 
 
 class TestPreferencias:
@@ -22,6 +22,7 @@ class TestPreferencias:
             fps_analisis=2.5,
             zona_puerta=[1, 2, 3, 4],
             detectar_rostros=True,
+            incremental=False,
         )
         prefs.guardar(destino)
         assert Preferencias.cargar(destino) == prefs
@@ -49,6 +50,7 @@ class TestPreferencias:
         leido = Preferencias.cargar(viejo)
         assert leido.carpeta_videos == "X:/"
         assert leido.backend_rostros == "yunet"
+        assert leido.usar_tracking is True
 
     def test_guardar_en_carpeta_inexistente_no_revienta(self, tmp_path):
         Preferencias().guardar(tmp_path / "no" / "existe" / "config.json")
@@ -60,12 +62,10 @@ class TestPreferencias:
         assert claves == set(Preferencias.__dataclass_fields__)
 
     def test_la_ruta_por_defecto_viene_de_registro(self):
-        assert app.RUTA_CONFIG == registro.ruta_config()
+        assert RUTA_CONFIG == registro.ruta_config()
 
 
 class TestParsearTiempo:
-    parsear = staticmethod(AplicacionDeCam._parsear_tiempo)
-
     @pytest.mark.parametrize(
         "texto, esperado",
         [
@@ -78,9 +78,9 @@ class TestParsearTiempo:
         ],
     )
     def test_formatos_validos(self, texto, esperado):
-        assert self.parsear(texto) == esperado
+        assert parsear_tiempo(texto) == esperado
 
     @pytest.mark.parametrize("texto", ["", "abc", "1:2:3:4", "1::2", "1:xx"])
     def test_formatos_invalidos(self, texto):
         with pytest.raises(ValueError):
-            self.parsear(texto)
+            parsear_tiempo(texto)

@@ -49,10 +49,10 @@ def congelado() -> bool:
 
 
 def _carpeta_del_programa() -> Path:
-    """Carpeta del ejecutable (o del proyecto, en desarrollo)."""
+    """Carpeta del ejecutable (o la raíz del proyecto, en desarrollo)."""
     if congelado():
         return Path(sys.executable).parent
-    return Path(__file__).parent
+    return Path(__file__).resolve().parent.parent
 
 
 def carpeta_datos() -> Path:

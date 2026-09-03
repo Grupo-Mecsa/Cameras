@@ -8,27 +8,31 @@ from dataclasses import asdict
 
 import pytest
 
-import manifiesto
-from detector import (
-    TIPO_ZONA,
-    AnalisisCancelado,
-    AnalizadorPuerta,
-    ConfiguracionAnalisis,
-    Evento,
-    ResultadoVideo,
-)
-from manifiesto import Manifiesto, huella_config
+from decam import manifiesto
+from decam.analizador import AnalisisCancelado, AnalizadorPuerta
+from decam.configuracion import ConfiguracionAnalisis
+from decam.deteccion import DeteccionCruda
+from decam.eventos import TIPO_ZONA, Evento, ResultadoVideo
+from decam.manifiesto import Manifiesto, huella_config
+from decam.salida import EscritorSalida
 
 
 def config(**kw) -> ConfiguracionAnalisis:
-    base = dict(
-        zona_puerta=(0, 0, 10, 10),
-        acelerador="cpu",
-        filtro_movimiento=False,
-        usar_tracking=False,
-    )
+    base = dict(zona_puerta=(0, 0, 10, 10), acelerador="cpu", filtro_movimiento=False)
     base.update(kw)
     return ConfiguracionAnalisis(**base)
+
+
+class DetectorNulo:
+    """Un detector que nunca ve a nadie; basta para probar la orquestación."""
+
+    descripcion = "detector nulo"
+
+    def preparar(self) -> None:
+        pass
+
+    def detectar(self, frame) -> list[DeteccionCruda]:
+        return []
 
 
 class TestSerializacion:
@@ -60,7 +64,7 @@ class TestHuella:
         assert huella_config(asdict(config(zona_puerta=(0, 0, 10, 11)))) != base
         assert huella_config(asdict(config(criterio_zona="centro"))) != base
         assert huella_config(asdict(config(fps_analisis=2.0))) != base
-        assert huella_config(asdict(config(usar_tracking=True))) != base
+        assert huella_config(asdict(config(usar_tracking=False))) != base
 
     def test_ignora_lo_que_no_altera_el_resultado(self):
         base = huella_config(asdict(config()))
@@ -142,98 +146,107 @@ class TestAnalizarVideosIncremental:
             v.parent.mkdir(exist_ok=True)
             v.write_bytes(b"0" * 10)
             videos.append(v)
-        salida = tmp_path / "salida"
+        salida = EscritorSalida(tmp_path / "salida", config().zona, guardar_recortes=False)
         llamadas: list[str] = []
-        eventos_notificados: list[Evento] = []
+        notificados: list[Evento] = []
 
-        def falso_analizar_video(self, video, carpeta_miniaturas=None, peso_progreso=(0, 1)):
+        def falso_analizar_video(self, video, salida=None, peso_progreso=(0, 1)):
             llamadas.append(video.name)
             r = ResultadoVideo(video.name, frames_analizados=3)
             r.eventos = [Evento(video.name, 1.0, 2.0, n_personas=1)]
             return r
 
         monkeypatch.setattr(AnalizadorPuerta, "analizar_video", falso_analizar_video)
-        analizador = AnalizadorPuerta(config(), on_evento=eventos_notificados.append)
-        return analizador, videos, salida, llamadas, eventos_notificados
+        analizador = AnalizadorPuerta(config(), DetectorNulo(), on_evento=notificados.append)
+        return analizador, videos, salida, llamadas, notificados
+
+    @staticmethod
+    def manif(salida: EscritorSalida) -> Manifiesto:
+        return Manifiesto(salida.carpeta / manifiesto.NOMBRE_MANIFIESTO)
 
     def test_segunda_pasada_reutiliza_todo(self, entorno):
         analizador, videos, salida, llamadas, notificados = entorno
 
-        r1 = analizador.analizar_videos(videos, salida, incremental=True)
+        r1 = analizador.analizar_videos(videos, salida, self.manif(salida))
         assert llamadas == ["a.mp4", "b.mp4"]
         assert not any(r.reutilizado for r in r1)
-        assert len(Manifiesto(salida / manifiesto.NOMBRE_MANIFIESTO)) == 2
+        assert len(self.manif(salida)) == 2
 
         notificados.clear()
-        r2 = analizador.analizar_videos(videos, salida, incremental=True)
+        r2 = analizador.analizar_videos(videos, salida, self.manif(salida))
         assert llamadas == ["a.mp4", "b.mp4"], "no se analizó nada de nuevo"
         assert all(r.reutilizado for r in r2)
         assert [e.archivo for e in notificados] == ["a.mp4", "b.mp4"], (
             "los eventos reutilizados también llegan a la interfaz"
         )
         # El CSV se reescribe con todo, reutilizado o no.
-        with (salida / "eventos.csv").open(encoding="utf-8-sig", newline="") as f:
+        with salida.ruta_csv.open(encoding="utf-8-sig", newline="") as f:
             filas = list(csv.DictReader(f))
         assert [f["archivo"] for f in filas] == ["a.mp4", "b.mp4"]
         assert filas[0]["personas_distintas"] == "1"
 
     def test_solo_se_reanaliza_lo_que_cambio(self, entorno):
         analizador, videos, salida, llamadas, _ = entorno
-        analizador.analizar_videos(videos, salida, incremental=True)
+        analizador.analizar_videos(videos, salida, self.manif(salida))
         videos[1].write_bytes(b"0" * 11)
-        r = analizador.analizar_videos(videos, salida, incremental=True)
+        r = analizador.analizar_videos(videos, salida, self.manif(salida))
         assert llamadas == ["a.mp4", "b.mp4", "b.mp4"]
         assert [x.reutilizado for x in r] == [True, False]
 
     def test_cambiar_la_configuracion_invalida_todo(self, entorno):
         analizador, videos, salida, llamadas, _ = entorno
-        analizador.analizar_videos(videos, salida, incremental=True)
+        analizador.analizar_videos(videos, salida, self.manif(salida))
         analizador.config.criterio_zona = "centro"
-        analizador.analizar_videos(videos, salida, incremental=True)
+        analizador.analizar_videos(videos, salida, self.manif(salida))
         assert llamadas == ["a.mp4", "b.mp4", "a.mp4", "b.mp4"]
 
-    def test_sin_incremental_ignora_el_manifiesto(self, entorno):
+    def test_sin_manifiesto_se_analiza_todo(self, entorno):
         analizador, videos, salida, llamadas, _ = entorno
-        analizador.analizar_videos(videos, salida, incremental=True)
-        analizador.analizar_videos(videos, salida, incremental=False)
+        analizador.analizar_videos(videos, salida, self.manif(salida))
+        analizador.analizar_videos(videos, salida, None)
         assert len(llamadas) == 4
-        assert not (salida / manifiesto.NOMBRE_MANIFIESTO).exists() or True
+
+    def test_sin_salida_no_escribe_nada(self, entorno, tmp_path):
+        analizador, videos, _, llamadas, _ = entorno
+        r = analizador.analizar_videos(videos, None, None)
+        assert len(r) == 2 and llamadas == ["a.mp4", "b.mp4"]
+        assert not (tmp_path / "salida" / "eventos.csv").exists()
 
     def test_los_errores_no_se_apuntan(self, entorno, monkeypatch):
         analizador, videos, salida, llamadas, _ = entorno
 
-        def con_error(self, video, carpeta_miniaturas=None, peso_progreso=(0, 1)):
+        def con_error(self, video, salida=None, peso_progreso=(0, 1)):
             llamadas.append(video.name)
             return ResultadoVideo(video.name, error="no abre")
 
         monkeypatch.setattr(AnalizadorPuerta, "analizar_video", con_error)
-        analizador.analizar_videos(videos, salida, incremental=True)
-        assert len(Manifiesto(salida / manifiesto.NOMBRE_MANIFIESTO)) == 0
-        analizador.analizar_videos(videos, salida, incremental=True)
+        analizador.analizar_videos(videos, salida, self.manif(salida))
+        assert len(self.manif(salida)) == 0
+        analizador.analizar_videos(videos, salida, self.manif(salida))
         assert len(llamadas) == 4, "se reintentan"
 
     def test_cancelar_conserva_lo_ya_analizado(self, entorno, monkeypatch):
         analizador, videos, salida, llamadas, _ = entorno
         original = AnalizadorPuerta.analizar_video
 
-        def cancela_en_el_segundo(self, video, carpeta_miniaturas=None, peso_progreso=(0, 1)):
+        def cancela_en_el_segundo(self, video, salida=None, peso_progreso=(0, 1)):
             if video.name == "b.mp4":
                 raise AnalisisCancelado()
-            return original(self, video, carpeta_miniaturas, peso_progreso)
+            return original(self, video, salida, peso_progreso)
 
         monkeypatch.setattr(AnalizadorPuerta, "analizar_video", cancela_en_el_segundo)
-        r = analizador.analizar_videos(videos, salida, incremental=True)
+        r = analizador.analizar_videos(videos, salida, self.manif(salida))
         assert [x.archivo for x in r] == ["a.mp4"]
-        assert len(Manifiesto(salida / manifiesto.NOMBRE_MANIFIESTO)) == 1
+        assert len(self.manif(salida)) == 1
 
         # Al relanzar, a.mp4 se reutiliza y solo falta b.mp4.
         monkeypatch.setattr(AnalizadorPuerta, "analizar_video", original)
-        r = analizador.analizar_videos(videos, salida, incremental=True)
+        r = analizador.analizar_videos(videos, salida, self.manif(salida))
         assert [x.reutilizado for x in r] == [True, False]
         assert llamadas == ["a.mp4", "b.mp4"]
 
     def test_los_eventos_reutilizados_son_del_tipo_correcto(self, entorno):
         analizador, videos, salida, _, _ = entorno
-        analizador.analizar_videos(videos, salida, incremental=True)
-        r = analizador.analizar_videos(videos, salida, incremental=True)
+        analizador.analizar_videos(videos, salida, self.manif(salida))
+        r = analizador.analizar_videos(videos, salida, self.manif(salida))
         assert all(e.tipo == TIPO_ZONA for x in r for e in x.eventos)

@@ -347,25 +347,46 @@ de 20–30 minutos.
 
 ## Estructura del proyecto
 
-| Archivo            | Contenido                                                        |
-|--------------------|------------------------------------------------------------------|
-| `app.py`           | Interfaz Tkinter y orquestación del hilo de análisis.             |
-| `detector.py`      | Detección de personas y rostros, eventos, CSV, miniaturas.        |
-| `build_exe.py`     | Compila la app a `.exe` con PyInstaller.                          |
-| `descargar_modelos.py` | Baja los ONNX de rostros de OpenCV Zoo.                       |
-| `.vscode/`         | Configuración de depuración y tareas de VS Code.                  |
-| `reporte.py`       | Informes HTML y PDF de los resultados.                            |
-| `registro.py`      | Carpeta de datos del usuario y registro en fichero.               |
-| `manifiesto.py`    | Manifiesto de videos ya analizados (análisis incremental).        |
-| `instalador.iss`   | Script de Inno Setup para el instalador de Windows.               |
-| `VERSION`          | Versión base de los releases automáticos.                         |
-| `.github/workflows/` | Release automático en cada push a `main`.                       |
-| `requirements.txt` | Dependencias de ejecución.                                        |
-| `requirements-dev.txt` | Añade PyInstaller y pytest.                                  |
-| `tests/`           | Tests unitarios (`python -m pytest`).                             |
-| `models/`          | ONNX de YuNet y SFace (los baja `descargar_modelos.py`).          |
-| `config.json`      | Se genera solo: última carpeta, zona y parámetros.                |
-| `analizados.json`  | En la carpeta de resultados: manifiesto del análisis incremental. |
+Todo el código vive en el paquete `decam/`; `app.py` solo lanza la interfaz.
+
+| Ruta | Qué hace |
+|---|---|
+| `app.py` | Punto de entrada: `python app.py`. |
+| `decam/analizador.py` | `AnalizadorPuerta` orquesta el análisis; `crear_analizador` monta las piezas reales. |
+| `decam/deteccion.py` | `DetectorPersonas` (protocolo) y `DetectorYOLO`. |
+| `decam/seguimiento.py` | `Rastreador` (protocolo) y ByteTrack; trayectorias y dirección; agrupación en eventos. |
+| `decam/zona.py` | `Zona` (protocolo), `ZonaRectangular` y los criterios pies/centro/solape. |
+| `decam/eventos.py` | `Evento`, `ResultadoVideo`, columnas del CSV. |
+| `decam/configuracion.py` | `ConfiguracionAnalisis` y su validación. |
+| `decam/movimiento.py` | Filtro de movimiento. |
+| `decam/video.py` | Búsqueda de videos, metadatos, saltos y lectura en hilo. |
+| `decam/rostros.py` | Detección (YuNet/Haar) e identificación (SFace) de rostros. |
+| `decam/aceleradores.py` | CUDA / OpenVINO / CPU y exportación a OpenVINO. |
+| `decam/salida.py` | `EscritorSalida`: miniaturas, recortes y CSV. |
+| `decam/manifiesto.py` | Manifiesto del análisis incremental. |
+| `decam/reporte.py` | Informes HTML y PDF. |
+| `decam/registro.py` | Carpeta de datos del usuario y log en fichero. |
+| `decam/ui/` | Tkinter: `PanelParametros`, `VistaPrevia`, `TablaEventos`, `AplicacionDeCam`. |
+| `tests/` | Tests unitarios (`python -m pytest`). |
+| `build_exe.py`, `instalador.iss`, `VERSION`, `.github/workflows/` | Ejecutable, instalador y releases. |
+| `descargar_modelos.py` | Baja los ONNX de rostros de OpenCV Zoo a `models/`. |
+| `requirements*.txt` | Dependencias de ejecución y de desarrollo. |
+| `config.json` | Se genera solo: última carpeta, zona y parámetros. |
+| `analizados.json` | En la carpeta de resultados: manifiesto del análisis incremental. |
+
+### Arquitectura
+
+`AnalizadorPuerta` no construye nada: recibe un `DetectorPersonas`, un
+`Rastreador`, el filtro de movimiento y el analizador de rostros ya hechos, y
+escribe a través de un `EscritorSalida` opcional. `crear_analizador(config)` es
+la única función que conoce YOLO y ByteTrack. Consecuencias prácticas:
+
+- Los tests recorren `analizar_video` entero con un detector guionizado y sin
+  modelo ([`tests/test_analizador.py`](tests/test_analizador.py)).
+- Cambiar de modelo es implementar `DetectorPersonas.detectar(frame)`; una zona
+  poligonal es implementar `Zona`. Ni los criterios ni el analizador cambian.
+- La interfaz solo conoce `crear_analizador`, `EscritorSalida` y `Manifiesto`,
+  y habla con el análisis por callbacks (`on_log`, `on_progreso`, `on_evento`).
 
 ### Dónde se guardan configuración y registro
 
@@ -409,7 +430,8 @@ Cubren la lógica que decide qué se registra y qué no, sin necesitar videos ni
 modelos: la geometría caja/zona y los tres criterios, la agrupación de detecciones
 en eventos (tolerancia, cierre al final del video, miniatura y rostros), el filtro
 de movimiento, el seguimiento (identificadores y dirección), el análisis
-incremental, el CSV, las preferencias y las rutas de datos en el `.exe`. Duran
+incremental, el recorrido completo de un video con un detector falso, el CSV,
+las preferencias y las rutas de datos en el `.exe`. Duran
 unos segundos. En VS Code aparecen en el panel de pruebas y en la tarea
 **DeCam: ejecutar tests**.
 
