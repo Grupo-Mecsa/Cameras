@@ -158,6 +158,31 @@ distancia solapaba la zona de la puerta del fondo en apenas un **1.7 % de su
 área**. El criterio antiguo (cualquier solape) lo daba por bueno; los tres
 criterios actuales lo descartan.
 
+### Seguimiento de personas (cuántas y hacia dónde)
+
+Con **Seguir a cada persona (ByteTrack)** activado (por defecto), cada persona
+recibe un identificador estable entre frames. Eso añade dos columnas a cada
+evento, en la tabla, el CSV y los informes:
+
+- **Personas**: cuántas personas *distintas* pasaron durante el evento. Sin
+  seguimiento, dos personas que cruzan seguidas son un solo evento sin más
+  información; con él, el evento dice "2".
+- **Dirección**: hacia dónde iba cada una respecto a la zona de la puerta:
+  - `entra`: apareció fuera de la zona y la última vez se la vio dentro (llegó a
+    la puerta y desapareció por ella).
+  - `sale`: apareció dentro de la zona y se alejó.
+  - `cruza`: pasó por la zona sin quedarse (fuera → dentro → fuera).
+  - `permanece`: siempre dentro de la zona.
+
+  Se resume por evento: `2 entran, 1 sale`.
+
+Si el seguimiento pierde a alguien (a 1 fps una persona rápida puede aparecer
+en un solo frame), la detección **no se pierde**: cuenta igualmente en el
+evento, y el conteo nunca baja del máximo de personas vistas a la vez. Para
+que las pistas sean fiables conviene analizar a **2 fps o más**; a 1 fps la
+dirección sale bien en pasillos largos y peor en puertas que se cruzan en dos
+segundos.
+
 ## Detección de rostros
 
 Es **opcional** y se activa con la casilla *Detectar rostros*. Solo se busca dentro
@@ -250,20 +275,47 @@ vistos a la vez** durante el evento, y los recortes salen del frame del evento d
 más rostros se detectaron (que no tiene por qué ser el de la miniatura). La
 columna `personas` lista las personas del catálogo reconocidas durante el evento.
 
+## Análisis incremental
+
+Con **Reutilizar videos ya analizados** activado (por defecto), la app apunta en
+`analizados.json`, dentro de la carpeta de resultados, cada video que termina
+de analizar: tamaño, fecha, los parámetros usados y sus eventos. Al volver a
+lanzar el análisis sobre la misma carpeta:
+
+- los videos que ya están en el manifiesto **con los mismos parámetros** y que
+  no han cambiado se saltan, y sus eventos se recuperan al instante (aparecen
+  en la tabla y en el informe como si se hubieran analizado ahora);
+- solo se procesan los videos nuevos o modificados;
+- el informe y el CSV se regeneran con todo, reutilizado o no.
+
+Cambiar la zona, el criterio, los fps, la tolerancia, el modelo o cualquier
+otro parámetro que altere los eventos invalida lo guardado y se reanaliza.
+Cambiar de acelerador o activar la decodificación por hardware **no**: dan los
+mismos eventos.
+
+Se escribe tras cada video, no al final, así que si cancelas o se corta a la
+mitad, lo ya hecho se conserva y al relanzar continúa donde estaba. Los videos
+que dieron error no se apuntan: se reintentan la próxima vez. Para reanalizar
+todo desde cero, desmarca la casilla o borra `analizados.json`.
+
 ## Generar el ejecutable (.exe)
 
 ```powershell
-pip install pyinstaller
+pip install -r requirements-dev.txt
 python build_exe.py
 ```
 
-Queda en `dist\DeCam\DeCam.exe` (carpeta distribuible completa). Con `--onefile`
-se genera un único `.exe`, pero **no es recomendable**: con PyTorch dentro supera
-1 GB y tarda casi un minuto en arrancar cada vez, porque se descomprime en una
-carpeta temporal.
+Queda en `dist\DeCam\DeCam.exe` (carpeta distribuible completa). Verificado: el
+build ocupa **1.1 GB**, el `.exe` son 47 MB y arranca en pocos segundos con unos
+280 MB de RAM. Con `--onefile` se genera un único archivo, pero **no es
+recomendable**: se descomprime en una carpeta temporal en cada arranque.
 
 Notas:
 
+- Si PyInstaller no está en el intérprete que ejecuta el script, este aborta con
+  un mensaje indicando cuál es ese intérprete. Ojo al lanzarlo desde el depurador
+  de VS Code: el diálogo de `SystemExit: 1` tapa el mensaje real, que está en la
+  consola justo encima.
 - El build pesa **1–3 GB** según si tienes PyTorch CPU o CUDA. Es normal.
 - Compila en la misma arquitectura de destino: un `.exe` solo corre en Windows.
 - Si ya descargaste los pesos (`yolov8n.pt`) o el ONNX de YuNet en `models/`, el
@@ -274,6 +326,25 @@ Notas:
 - Para depurar un `.exe` que se cierra al instante, recompila con `--console` y
   lánzalo desde una terminal para ver el error.
 
+### Releases automáticos (GitHub Actions)
+
+Cada push a `main` ejecuta [`.github/workflows/release.yml`](.github/workflows/release.yml):
+
+1. instala las dependencias y corre los tests (si fallan, no hay release);
+2. descarga los modelos (YuNet/SFace, `yolov8n.pt`) y exporta YOLO a OpenVINO,
+   para que el equipo destino no tenga que descargar nada;
+3. compila con `build_exe.py` y genera el instalador con Inno Setup
+   ([`instalador.iss`](instalador.iss));
+4. publica un release con la etiqueta `v<VERSION>.<número de ejecución>` y el
+   `DeCam-Setup-*.exe` adjunto, con notas generadas a partir de los commits.
+
+La versión base vive en el fichero [`VERSION`](VERSION) (`1.0.0`); el cuarto
+número lo pone GitHub, así cada build es única sin tocar nada. Para subir de
+versión, edita `VERSION`. El instalador es **por usuario** (no pide
+administrador) e instala en `%LOCALAPPDATA%\Programs\DeCam`. Pesa varios
+cientos de MB porque lleva PyTorch y OpenVINO dentro; el build tarda del orden
+de 20–30 minutos.
+
 ## Estructura del proyecto
 
 | Archivo            | Contenido                                                        |
@@ -283,9 +354,34 @@ Notas:
 | `build_exe.py`     | Compila la app a `.exe` con PyInstaller.                          |
 | `descargar_modelos.py` | Baja los ONNX de rostros de OpenCV Zoo.                       |
 | `.vscode/`         | Configuración de depuración y tareas de VS Code.                  |
-| `requirements.txt` | Dependencias.                                                     |
+| `reporte.py`       | Informes HTML y PDF de los resultados.                            |
+| `registro.py`      | Carpeta de datos del usuario y registro en fichero.               |
+| `manifiesto.py`    | Manifiesto de videos ya analizados (análisis incremental).        |
+| `instalador.iss`   | Script de Inno Setup para el instalador de Windows.               |
+| `VERSION`          | Versión base de los releases automáticos.                         |
+| `.github/workflows/` | Release automático en cada push a `main`.                       |
+| `requirements.txt` | Dependencias de ejecución.                                        |
+| `requirements-dev.txt` | Añade PyInstaller y pytest.                                  |
+| `tests/`           | Tests unitarios (`python -m pytest`).                             |
 | `models/`          | ONNX de YuNet y SFace (los baja `descargar_modelos.py`).          |
 | `config.json`      | Se genera solo: última carpeta, zona y parámetros.                |
+| `analizados.json`  | En la carpeta de resultados: manifiesto del análisis incremental. |
+
+### Dónde se guardan configuración y registro
+
+Al arrancar, la app escribe ambas rutas en la pestaña **Registro**.
+
+- **Ejecutando el código**: `config.json` y `decam.log` quedan junto a `app.py`.
+- **Ejecutable (`.exe`)**: en `%LOCALAPPDATA%\DeCam\`. No pueden ir junto al
+  `.exe` porque en modo `--onefile` esa carpeta es temporal y se borra al salir,
+  y en `--onedir` puede ser de solo lectura.
+- **Instalación portable**: si colocas un `config.json` (aunque sea `{}`) junto
+  al `.exe`, se usa esa carpeta para todo.
+
+`decam.log` rota al llegar a 1 MB y conserva 3 copias. Recoge el registro de la
+interfaz y, además, el traceback completo de cualquier fallo: es lo primero que
+hay que mirar si el `.exe` falla, porque al compilarse sin consola no hay otra
+forma de verlo.
 
 ## Notas y ajustes
 
@@ -301,6 +397,21 @@ Notas:
   escapan personas.
 - La zona guardada corresponde a la resolución de la cámara con la que se dibujó.
   Si mezclas cámaras con resoluciones distintas, redibuja la zona para cada tanda.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Cubren la lógica que decide qué se registra y qué no, sin necesitar videos ni
+modelos: la geometría caja/zona y los tres criterios, la agrupación de detecciones
+en eventos (tolerancia, cierre al final del video, miniatura y rostros), el filtro
+de movimiento, el seguimiento (identificadores y dirección), el análisis
+incremental, el CSV, las preferencias y las rutas de datos en el `.exe`. Duran
+unos segundos. En VS Code aparecen en el panel de pruebas y en la tarea
+**DeCam: ejecutar tests**.
 
 ## Depurar en VS Code
 

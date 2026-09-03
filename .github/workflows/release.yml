@@ -1,0 +1,82 @@
+# Compila DeCam, genera el instalador de Windows y publica un release en GitHub
+# con cada push a main. La versión es VERSION + número de ejecución, así cada
+# build tiene su etiqueta única (v1.0.0.42) sin tener que tocar nada a mano.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Un release a la vez: si se encolan dos pushes seguidos, el segundo espera.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Tests
+        run: python -m pytest -o addopts="" -q
+
+      - name: Calcular versión
+        id: version
+        shell: pwsh
+        run: |
+          $base = (Get-Content VERSION -Raw).Trim()
+          $version = "$base.${{ github.run_number }}"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $version"
+
+      # Los modelos se incluyen en el ejecutable para que el equipo destino no
+      # tenga que descargar nada ni exportar a OpenVINO la primera vez.
+      - name: Descargar y preparar modelos
+        run: |
+          python descargar_modelos.py
+          python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+          python -c "import detector; detector.exportar_a_openvino('yolov8n', print)"
+
+      - name: Compilar ejecutable (PyInstaller)
+        run: python build_exe.py
+
+      - name: Instalar Inno Setup si falta
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+
+      - name: Crear instalador (Inno Setup)
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=${{ steps.version.outputs.version }} instalador.iss
+          Get-ChildItem instalador
+
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: DeCam ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: instalador/DeCam-Setup-*.exe

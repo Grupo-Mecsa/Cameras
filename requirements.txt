@@ -4,3 +4,6 @@ pillow>=10.0.0
 
 # Aceleración en GPU/CPU Intel. Sin esto, el análisis corre en PyTorch CPU.
 openvino>=2024.0
+
+# Informe en PDF. Sin esto, solo se genera el informe HTML.
+reportlab>=4.0.0

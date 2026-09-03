@@ -8,13 +8,16 @@ poder cancelar el análisis.
 from __future__ import annotations
 
 import csv
+import math
 import queue
 import threading
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
 
 import cv2
+
+import manifiesto
 
 # Extensiones de video soportadas.
 EXTENSIONES_VIDEO: tuple[str, ...] = (".mp4", ".avi", ".mkv")
@@ -180,6 +183,25 @@ def exportar_a_openvino(modelo: str, on_log: Optional[CallbackLog] = None) -> Pa
     return destino
 
 
+def abrir_captura(video: str | Path, hardware: bool = False) -> cv2.VideoCapture:
+    """Abre un video, opcionalmente con decodificación acelerada por hardware.
+
+    La aceleración (Quick Sync, D3D11) descomprime ~2.2x más rápido, pero el
+    decodificador del driver aplica una conversión de color ligeramente distinta
+    a la del decodificador por software: la imagen sale con un sesgo uniforme de
+    unos 8 niveles de gris. Las cajas apenas se mueven (±2 px), pero las
+    detecciones que rozaban el umbral de confianza pueden caerse. Por eso viene
+    desactivada por defecto.
+    """
+    if not hardware:
+        return cv2.VideoCapture(str(video))
+    return cv2.VideoCapture(
+        str(video),
+        cv2.CAP_FFMPEG,
+        [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY],
+    )
+
+
 def primer_frame(video: str | Path):
     """Lee el primer frame de un video.
 
@@ -229,9 +251,14 @@ def info_video(captura: cv2.VideoCapture) -> InfoVideo:
 
 #: Frames que se decodifican antes del objetivo para que el códec se
 #: resincronice tras un salto. En H.265/HEVC, leer justo después de un
-#: ``CAP_PROP_POS_FRAMES`` devuelve imágenes rotas (solo se decodifica la zona
-#: en movimiento sobre un fondo gris); con 5 frames de margen ya salen limpias.
-MARGEN_RESINCRONIZACION = 5
+#: ``CAP_PROP_POS_FRAMES`` devuelve imágenes rotas: solo se decodifica la zona
+#: en movimiento sobre un fondo gris.
+#:
+#: El margen necesario depende del GOP del archivo. Medido contra decodificación
+#: secuencial (la referencia fiable) sobre grabaciones Hikvision 1080p H.265:
+#: con margen 5 el 27 % de los píxeles sigue mal y con margen 15 aún el 9 %;
+#: a partir de 30 la imagen es correcta y no mejora subiendo más. Se deja en 30.
+MARGEN_RESINCRONIZACION = 30
 
 
 def leer_frame(
@@ -290,6 +317,71 @@ def normalizar_zona(zona: Sequence[float]) -> tuple[int, int, int, int]:
         int(round(max(x1, x2))),
         int(round(max(y1, y2))),
     )
+
+
+#: Fracción de píxeles que deben cambiar entre dos frames analizados para que
+#: valga la pena invocar al modelo. Medido sobre grabaciones de pasillo 1080p:
+#: los frames con persona no bajan de 0.009 y los vacíos no pasan de 0.0011 (p90),
+#: así que 0.002 deja un margen holgado por ambos lados.
+UMBRAL_MOVIMIENTO = 0.002
+
+#: Ancho al que se reduce el frame para comparar. Reducir es lo que hace barata
+#: la comparación y, de paso, diluye el reloj sobreimpreso de las cámaras.
+ANCHO_MOVIMIENTO = 320
+
+
+class DetectorMovimiento:
+    """Mide cuánto cambia un frame respecto al anterior analizado.
+
+    Sirve para no invocar al modelo en frames donde no ocurre nada, que en una
+    cámara de vigilancia son la inmensa mayoría. El frame se pasa a gris, se
+    reduce y se difumina antes de compararlo: así un cambio irrelevante —el
+    reloj sobreimpreso, el ruido del sensor— no cuenta como movimiento.
+    """
+
+    def __init__(
+        self,
+        ancho: int = ANCHO_MOVIMIENTO,
+        umbral_pixel: int = 25,
+    ) -> None:
+        """Prepara el detector.
+
+        Args:
+            ancho: ancho al que se reduce el frame antes de comparar.
+            umbral_pixel: diferencia de gris a partir de la cual un píxel cuenta
+                como cambiado.
+        """
+        self.ancho = ancho
+        self.umbral_pixel = umbral_pixel
+        self._previo = None
+
+    def _preparar(self, frame):
+        """Pasa el frame a gris reducido y difuminado."""
+        gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        alto = max(1, int(gris.shape[0] * self.ancho / gris.shape[1]))
+        return cv2.GaussianBlur(cv2.resize(gris, (self.ancho, alto)), (5, 5), 0)
+
+    def fraccion_cambiada(self, frame) -> float:
+        """Devuelve la fracción de píxeles que cambian respecto al frame previo.
+
+        El primer frame no tiene con qué compararse, así que devuelve ``1.0``
+        para que siempre se analice.
+        """
+        actual = self._preparar(frame)
+        if self._previo is None:
+            self._previo = actual
+            return 1.0
+
+        diferencia = cv2.absdiff(self._previo, actual)
+        _, binaria = cv2.threshold(
+            diferencia, self.umbral_pixel, 255, cv2.THRESH_BINARY
+        )
+        self._previo = actual
+        return cv2.countNonZero(binaria) / binaria.size
+
+    def reiniciar(self) -> None:
+        """Olvida el frame de referencia; se usa al cambiar de video."""
+        self._previo = None
 
 
 #: Modelos ONNX de OpenCV Zoo. Se buscan en la carpeta ``models/``.
@@ -621,11 +713,26 @@ class Evento:
     miniatura: str = ""
     rostros: int = 0
     personas: str = ""
+    #: Personas distintas vistas durante el evento (por seguimiento; si no hay
+    #: seguimiento, el máximo de personas simultáneas en un frame).
+    n_personas: int = 0
+    #: Resumen de hacia dónde iban: ``"2 entran, 1 sale"``. Vacío sin seguimiento.
+    direccion: str = ""
 
     @property
     def duracion(self) -> float:
         """Duración del evento en segundos."""
         return max(0.0, self.fin - self.inicio)
+
+    def a_dict(self) -> dict[str, Any]:
+        """Representación serializable (para el manifiesto)."""
+        return asdict(self)
+
+    @classmethod
+    def desde_dict(cls, datos: dict[str, Any]) -> "Evento":
+        """Reconstruye un evento; ignora claves desconocidas de otras versiones."""
+        campos = {k: v for k, v in datos.items() if k in cls.__dataclass_fields__}
+        return cls(**campos)
 
     def a_fila_csv(self) -> dict[str, str]:
         """Representación del evento como fila del CSV de salida."""
@@ -637,10 +744,16 @@ class Evento:
             "duracion_segundos": f"{self.duracion:.2f}",
             "rostros": str(self.rostros),
             "personas": self.personas,
+            "personas_distintas": str(self.n_personas),
+            "direccion": self.direccion,
         }
 
     def __str__(self) -> str:
-        extra = f", {self.rostros} rostro(s)" if self.rostros else ""
+        extra = f", {self.n_personas} persona(s)" if self.n_personas > 1 else ""
+        if self.direccion:
+            extra += f", {self.direccion}"
+        if self.rostros:
+            extra += f", {self.rostros} rostro(s)"
         if self.personas:
             extra += f" [{self.personas}]"
         return (
@@ -659,6 +772,9 @@ class ConfiguracionAnalisis:
     modelo: str = "yolov8n"
     confianza: float = 0.35
     acelerador: str = "auto"
+    decodificacion_hardware: bool = False
+    filtro_movimiento: bool = True
+    umbral_movimiento: float = UMBRAL_MOVIMIENTO
     criterio_zona: str = "pies"
     min_solape: float = 0.25
     registrar_general: bool = True
@@ -668,6 +784,10 @@ class ConfiguracionAnalisis:
     identificar_rostros: bool = False
     carpeta_personas: str = ""
     umbral_identificacion: float = UMBRAL_SFACE
+    #: Seguir a cada persona entre frames (ByteTrack) para contar personas
+    #: distintas y saber si entran o salen. Cuesta poco; solo se desactiva para
+    #: comparar resultados con versiones anteriores.
+    usar_tracking: bool = True
 
     def validar(self) -> None:
         """Verifica que los parámetros sean utilizables.
@@ -691,6 +811,8 @@ class ConfiguracionAnalisis:
             raise ValueError("El solape mínimo debe estar entre 0 y 1.")
         if self.acelerador not in ACELERADORES:
             raise ValueError(f"Acelerador inválido: {self.acelerador}")
+        if not 0 <= self.umbral_movimiento < 1:
+            raise ValueError("El umbral de movimiento debe estar entre 0 y 1.")
 
 
 def fraccion_dentro(
@@ -772,6 +894,8 @@ class _EventoCerrado:
     caja_miniatura: Optional[tuple[int, int, int, int]] = None
     frame_rostros: Any = None
     cajas_rostros: list[tuple[int, int, int, int]] = field(default_factory=list)
+    #: Identificadores de seguimiento de las personas vistas en el evento.
+    ids: set[int] = field(default_factory=set)
 
 
 class _SeguidorEventos:
@@ -794,6 +918,13 @@ class _SeguidorEventos:
         self._frame_rostros = None
         self._cajas_rostros: list[tuple[int, int, int, int]] = []
         self._nombres: set[str] = set()
+        self._ids: set[int] = set()
+        self._max_simultaneas = 0
+
+    @property
+    def activo(self) -> bool:
+        """``True`` si hay un evento abierto pendiente de cerrar."""
+        return self._evento is not None
 
     def actualizar(
         self,
@@ -802,15 +933,22 @@ class _SeguidorEventos:
         frame,
         rostros: list[tuple[int, int, int, int]],
         nombres: set[str],
+        ids: Optional[set[int]] = None,
+        simultaneas: int = 1,
     ) -> Optional[_EventoCerrado]:
         """Incorpora el resultado de un frame.
 
         Args:
             segundo: instante del frame dentro del video.
-            caja: caja de la persona detectada, o ``None`` si no hay ninguna.
+            caja: caja de la persona principal detectada, o ``None`` si no hay
+                ninguna.
             frame: imagen del frame (solo se usa si hay detección).
             rostros: cajas de los rostros encontrados en esa persona.
             nombres: nombres del catálogo reconocidos en ese frame.
+            ids: identificadores de seguimiento de todas las personas del frame
+                que cuentan para este seguidor.
+            simultaneas: cuántas personas había en el frame para este seguidor;
+                sirve de respaldo para contar cuando no hay seguimiento.
 
         Returns:
             El evento que se acaba de cerrar, o ``None`` si no se cerró ninguno.
@@ -826,6 +964,9 @@ class _SeguidorEventos:
                 self._evento.fin = segundo
             self._ultimo_positivo = segundo
             self._nombres |= nombres
+            if ids:
+                self._ids |= ids
+            self._max_simultaneas = max(self._max_simultaneas, simultaneas)
 
             # Se conserva el frame con más rostros: es el mejor para los recortes.
             if len(rostros) > self._evento.rostros:
@@ -844,12 +985,16 @@ class _SeguidorEventos:
             return None
 
         self._evento.personas = ", ".join(sorted(self._nombres))
+        # Con seguimiento, las pistas distintas; sin él, o si el seguimiento
+        # perdió a alguien, al menos las que llegaron a verse a la vez.
+        self._evento.n_personas = max(len(self._ids), self._max_simultaneas)
         cerrado = _EventoCerrado(
             evento=self._evento,
             frame_miniatura=self._frame_miniatura,
             caja_miniatura=self._caja_miniatura,
             frame_rostros=self._frame_rostros,
             cajas_rostros=self._cajas_rostros,
+            ids=self._ids,
         )
         self._evento = None
         self._frame_miniatura = None
@@ -857,7 +1002,152 @@ class _SeguidorEventos:
         self._frame_rostros = None
         self._cajas_rostros = []
         self._nombres = set()
+        self._ids = set()
+        self._max_simultaneas = 0
         return cerrado
+
+
+# ------------------------------------------------------------------ seguimiento
+
+
+@dataclass(frozen=True)
+class Deteccion:
+    """Una persona detectada en un frame, con su identificador de seguimiento."""
+
+    caja: tuple[int, int, int, int]
+    #: ``None`` si no hay seguimiento o la pista aún no se ha confirmado.
+    id: Optional[int] = None
+
+    @property
+    def area(self) -> int:
+        x1, y1, x2, y2 = self.caja
+        return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+class RastreadorPersonas:
+    """Asigna un identificador estable a cada persona entre frames (ByteTrack).
+
+    Se usa el tracker de ultralytics directamente, en vez de ``modelo.track()``,
+    por dos motivos: ``track()`` descarta las detecciones cuya pista aún no se
+    ha confirmado (una persona vista en un solo frame desaparecería), y no deja
+    reiniciar el seguimiento al cambiar de video de forma explícita. Aquí todas
+    las detecciones se conservan; las que todavía no tienen pista llevan
+    ``id=None``.
+    """
+
+    #: Frames que ByteTrack mantiene viva una pista perdida, como mínimo.
+    BUFFER_MINIMO = 30
+
+    def __init__(self, fps_analisis: float, tolerancia_segundos: float) -> None:
+        """Crea el tracker.
+
+        Args:
+            fps_analisis: frames analizados por segundo de video.
+            tolerancia_segundos: tolerancia de agrupación de eventos. Una pista
+                perdida se mantiene al menos ese tiempo para que la misma
+                persona no reciba dos identificadores si la detección falla
+                unos frames.
+        """
+        from types import SimpleNamespace
+
+        from ultralytics.trackers import BYTETracker  # import perezoso
+
+        # ByteTrack cuenta en frames analizados, no en segundos.
+        self.buffer = max(
+            self.BUFFER_MINIMO, math.ceil(tolerancia_segundos * fps_analisis) + 1
+        )
+        argumentos = SimpleNamespace(
+            track_high_thresh=0.25,
+            track_low_thresh=0.1,
+            new_track_thresh=0.25,
+            track_buffer=self.buffer,
+            match_thresh=0.8,
+            fuse_score=True,
+        )
+        self._tracker = BYTETracker(argumentos)
+
+    def reiniciar(self) -> None:
+        """Olvida todas las pistas; se llama al empezar cada video."""
+        self._tracker.reset()
+
+    def asignar_ids(self, cajas) -> list[Optional[int]]:
+        """Devuelve el identificador de cada detección, alineado con ``cajas``.
+
+        Args:
+            cajas: objeto ``Boxes`` de ultralytics ya pasado a numpy. Puede estar
+                vacío: entonces solo se avanza el tiempo del tracker para que
+                las pistas perdidas envejezcan.
+        """
+        ids: list[Optional[int]] = [None] * len(cajas)
+        pistas = self._tracker.update(cajas)
+        # Cada fila: x1, y1, x2, y2, id, confianza, clase, índice en ``cajas``.
+        for fila in pistas:
+            ids[int(fila[-1])] = int(fila[4])
+        return ids
+
+
+#: Etiquetas de dirección, por (estaba dentro al principio, estaba dentro al final).
+DIRECCIONES = {
+    (False, True): "entra",
+    (True, False): "sale",
+    (False, False): "cruza",
+    (True, True): "permanece",
+}
+_PLURALES = {"entra": "entran", "sale": "salen", "cruza": "cruzan", "permanece": "permanecen"}
+
+
+@dataclass
+class _Trayectoria:
+    """Lo que se sabe del recorrido de una pista respecto a la zona."""
+
+    primero_dentro: bool
+    ultimo_dentro: bool
+    estuvo_dentro: bool
+
+
+class _Trayectorias:
+    """Recorrido de cada pista respecto a la zona de la puerta, en un video.
+
+    Con esto se decide la dirección de cada persona: si la primera vez que se
+    la vio estaba fuera de la zona y la última dentro, "entra" (llegó a la
+    puerta y desapareció por ella); al revés, "sale"; fuera-fuera, "cruza" la
+    zona de paso; dentro-dentro, "permanece".
+    """
+
+    def __init__(self) -> None:
+        self._pistas: dict[int, _Trayectoria] = {}
+
+    def observar(self, id_pista: int, dentro: bool) -> None:
+        """Anota dónde está la pista en este frame."""
+        actual = self._pistas.get(id_pista)
+        if actual is None:
+            self._pistas[id_pista] = _Trayectoria(dentro, dentro, dentro)
+        else:
+            actual.ultimo_dentro = dentro
+            actual.estuvo_dentro = actual.estuvo_dentro or dentro
+
+    def direccion(self, id_pista: int) -> Optional[str]:
+        """Dirección de una pista, o ``None`` si nunca tocó la zona."""
+        pista = self._pistas.get(id_pista)
+        if pista is None or not pista.estuvo_dentro:
+            return None
+        return DIRECCIONES[(pista.primero_dentro, pista.ultimo_dentro)]
+
+    def resumen(self, ids: Iterable[int]) -> str:
+        """Resume las direcciones de varias pistas: ``"2 entran, 1 sale"``."""
+        conteo: dict[str, int] = {}
+        for id_pista in ids:
+            etiqueta = self.direccion(id_pista)
+            if etiqueta is not None:
+                conteo[etiqueta] = conteo.get(etiqueta, 0) + 1
+        partes = []
+        for etiqueta in DIRECCIONES.values():  # orden fijo y legible
+            n = conteo.get(etiqueta, 0)
+            if n == 1:
+                partes.append(f"1 {etiqueta}")
+            elif n > 1:
+                partes.append(f"{n} {_PLURALES[etiqueta]}")
+        return ", ".join(partes)
 
 
 #: Frames muestreados que caben en la cola entre el lector y el analizador.
@@ -1013,6 +1303,43 @@ class ResultadoVideo:
     archivo: str
     eventos: list[Evento] = field(default_factory=list)
     error: Optional[str] = None
+    frames_analizados: int = 0
+    frames_omitidos: int = 0
+    #: ``True`` si se recuperó del manifiesto en vez de analizarse ahora.
+    reutilizado: bool = False
+
+    def a_dict(self) -> dict[str, Any]:
+        """Representación serializable (para el manifiesto)."""
+        return {
+            "archivo": self.archivo,
+            "eventos": [e.a_dict() for e in self.eventos],
+            "error": self.error,
+            "frames_analizados": self.frames_analizados,
+            "frames_omitidos": self.frames_omitidos,
+        }
+
+    @classmethod
+    def desde_dict(cls, datos: dict[str, Any]) -> "ResultadoVideo":
+        """Reconstruye un resultado guardado y lo marca como reutilizado."""
+        return cls(
+            archivo=str(datos.get("archivo", "")),
+            eventos=[Evento.desde_dict(e) for e in datos.get("eventos", [])],
+            error=datos.get("error"),
+            frames_analizados=int(datos.get("frames_analizados", 0)),
+            frames_omitidos=int(datos.get("frames_omitidos", 0)),
+            reutilizado=True,
+        )
+
+    @property
+    def frames_muestreados(self) -> int:
+        """Frames que se muestrearon, se analizaran o no."""
+        return self.frames_analizados + self.frames_omitidos
+
+    @property
+    def ahorro_movimiento(self) -> float:
+        """Fracción de frames muestreados que el filtro de movimiento descartó."""
+        total = self.frames_muestreados
+        return self.frames_omitidos / total if total else 0.0
 
 
 class AnalizadorPuerta:
@@ -1055,6 +1382,19 @@ class AnalizadorPuerta:
 
         # Un fallo en rostros nunca debe impedir el análisis de personas: se
         # avisa por el log y se sigue sin esa función.
+        self.movimiento: Optional[DetectorMovimiento] = (
+            DetectorMovimiento() if config.filtro_movimiento else None
+        )
+
+        self.rastreador: Optional[RastreadorPersonas] = None
+        if config.usar_tracking:
+            try:
+                self.rastreador = RastreadorPersonas(
+                    config.fps_analisis, config.tolerancia_segundos
+                )
+            except ImportError as exc:
+                self._log(f"Seguimiento de personas desactivado: {exc}")
+
         self.detector_rostros: Optional[DetectorRostros] = None
         if config.detectar_rostros:
             try:
@@ -1144,7 +1484,7 @@ class AnalizadorPuerta:
         """
         ruta = Path(video)
         resultado = ResultadoVideo(archivo=ruta.name)
-        captura = cv2.VideoCapture(str(ruta))
+        captura = abrir_captura(ruta, self.config.decodificacion_hardware)
 
         if not captura.isOpened():
             captura.release()
@@ -1153,6 +1493,11 @@ class AnalizadorPuerta:
 
         try:
             info = info_video(captura)
+            if self.movimiento is not None:
+                self.movimiento.reiniciar()
+            if self.rastreador is not None:
+                self.rastreador.reiniciar()
+            trayectorias = _Trayectorias()
             paso = max(1, int(round(info.fps / self.config.fps_analisis)))
             modelo = self.cargar_modelo()
             zona = self.config.zona_puerta
@@ -1181,6 +1526,7 @@ class AnalizadorPuerta:
                         seguidores,
                         resultado,
                         carpeta_miniaturas,
+                        trayectorias,
                     )
 
                     pct_video = (
@@ -1198,7 +1544,9 @@ class AnalizadorPuerta:
 
             # Los eventos que siguen abiertos al acabar el video se cierran igual.
             for seguidor in seguidores:
-                self._registrar(seguidor.cerrar(), resultado, carpeta_miniaturas)
+                self._registrar(
+                    seguidor.cerrar(), resultado, carpeta_miniaturas, trayectorias
+                )
 
             self._progreso(ruta.name, 100.0, (base_progreso + ancho_progreso) * 100.0)
             return resultado
@@ -1214,16 +1562,36 @@ class AnalizadorPuerta:
         seguidores: list["_SeguidorEventos"],
         resultado: ResultadoVideo,
         carpeta_miniaturas: Optional[Path],
+        trayectorias: _Trayectorias,
     ) -> None:
-        """Detecta personas en un frame y alimenta cada seguidor de eventos."""
+        """Detecta personas en un frame y alimenta cada seguidor de eventos.
+
+        Si el filtro de movimiento está activo y el frame no ha cambiado, se
+        salta la inferencia: es lo que evita ejecutar el modelo sobre horas de
+        pasillo vacío. Nunca se salta mientras haya un evento abierto, para no
+        perder a alguien que se queda quieto delante de la puerta.
+        """
+        if self._sin_movimiento(frame, seguidores):
+            resultado.frames_omitidos += 1
+            for seguidor in seguidores:
+                self._registrar(
+                    seguidor.actualizar(segundo, None, None, [], set()),
+                    resultado,
+                    carpeta_miniaturas,
+                )
+            return
+
+        resultado.frames_analizados += 1
         personas = self._detectar_personas(modelo, frame)
-        en_zona = [
-            caja
-            for caja in personas
-            if persona_en_zona(
-                caja, zona, self.config.criterio_zona, self.config.min_solape
+        en_zona: list[Deteccion] = []
+        for deteccion in personas:
+            dentro = persona_en_zona(
+                deteccion.caja, zona, self.config.criterio_zona, self.config.min_solape
             )
-        ]
+            if dentro:
+                en_zona.append(deteccion)
+            if deteccion.id is not None:
+                trayectorias.observar(deteccion.id, dentro)
 
         for seguidor in seguidores:
             candidatas = en_zona if seguidor.tipo == TIPO_ZONA else personas
@@ -1232,10 +1600,35 @@ class AnalizadorPuerta:
             else:
                 # La persona más grande es la más cercana a la cámara y la que
                 # mejor se ve en la miniatura.
-                caja = max(candidatas, key=lambda c: (c[2] - c[0]) * (c[3] - c[1]))
-                rostros, nombres = self._analizar_rostros(frame, caja)
-                cerrado = seguidor.actualizar(segundo, caja, frame, rostros, nombres)
-            self._registrar(cerrado, resultado, carpeta_miniaturas)
+                principal = max(candidatas, key=lambda d: d.area)
+                rostros, nombres = self._analizar_rostros(frame, principal.caja)
+                ids = {d.id for d in candidatas if d.id is not None}
+                cerrado = seguidor.actualizar(
+                    segundo,
+                    principal.caja,
+                    frame,
+                    rostros,
+                    nombres,
+                    ids=ids,
+                    simultaneas=len(candidatas),
+                )
+            self._registrar(cerrado, resultado, carpeta_miniaturas, trayectorias)
+
+    def _sin_movimiento(
+        self, frame, seguidores: list["_SeguidorEventos"]
+    ) -> bool:
+        """Indica si el frame puede saltarse por no haber cambiado nada.
+
+        Mientras algún seguidor tenga un evento abierto se devuelve ``False``
+        aunque la imagen esté quieta: una persona parada apenas genera cambios,
+        y cortarle el evento la partiría en dos o la perdería.
+        """
+        if self.movimiento is None:
+            return False
+        cambio = self.movimiento.fraccion_cambiada(frame)
+        if any(seguidor.activo for seguidor in seguidores):
+            return False
+        return cambio < self.config.umbral_movimiento
 
     def _analizar_rostros(
         self, frame, caja: tuple[int, int, int, int]
@@ -1257,8 +1650,8 @@ class AnalizadorPuerta:
                     nombres.add(identidad.nombre)
         return [r.caja for r in rostros], nombres
 
-    def _detectar_personas(self, modelo, frame) -> list[tuple[int, int, int, int]]:
-        """Devuelve las cajas de todas las personas detectadas en el frame."""
+    def _detectar_personas(self, modelo, frame) -> list[Deteccion]:
+        """Devuelve todas las personas detectadas en el frame, con su pista."""
         predicciones = modelo.predict(
             frame,
             classes=[CLASE_PERSONA],
@@ -1266,26 +1659,35 @@ class AnalizadorPuerta:
             device=self.dispositivo,
             verbose=False,
         )
-        cajas: list[tuple[int, int, int, int]] = []
+        detecciones: list[Deteccion] = []
         for prediccion in predicciones:
             cajas_pred = getattr(prediccion, "boxes", None)
             if cajas_pred is None:
                 continue
-            for valores in cajas_pred.xyxy.cpu().numpy():
+            cajas_np = cajas_pred.cpu().numpy()
+            ids: list[Optional[int]] = (
+                self.rastreador.asignar_ids(cajas_np)
+                if self.rastreador is not None
+                else [None] * len(cajas_np)
+            )
+            for valores, id_pista in zip(cajas_np.xyxy, ids):
                 x1, y1, x2, y2 = (int(v) for v in valores[:4])
-                cajas.append((x1, y1, x2, y2))
-        return cajas
+                detecciones.append(Deteccion((x1, y1, x2, y2), id_pista))
+        return detecciones
 
     def _registrar(
         self,
         cerrado: Optional["_EventoCerrado"],
         resultado: ResultadoVideo,
         carpeta_miniaturas: Optional[Path],
+        trayectorias: Optional[_Trayectorias] = None,
     ) -> None:
         """Guarda las imágenes de un evento recién cerrado y lo notifica."""
         if cerrado is None:
             return
         evento = cerrado.evento
+        if trayectorias is not None and cerrado.ids:
+            evento.direccion = trayectorias.resumen(cerrado.ids)
 
         if carpeta_miniaturas is not None and cerrado.frame_miniatura is not None:
             evento.miniatura = self._guardar_miniatura(
@@ -1400,6 +1802,7 @@ class AnalizadorPuerta:
         self,
         videos: Iterable[str | Path],
         carpeta_salida: str | Path,
+        incremental: bool = False,
     ) -> list[ResultadoVideo]:
         """Analiza varios videos y escribe ``eventos.csv`` y las miniaturas.
 
@@ -1409,31 +1812,76 @@ class AnalizadorPuerta:
         Args:
             videos: rutas de los videos a analizar.
             carpeta_salida: carpeta donde se escriben los resultados.
+            incremental: reutilizar, desde el manifiesto de la carpeta de
+                salida, los videos ya analizados con esta misma configuración
+                y que no hayan cambiado. Cada video analizado se apunta en el
+                acto, así que una cancelación no pierde lo hecho hasta entonces.
 
         Returns:
-            La lista de resultados, uno por video procesado.
+            La lista de resultados, uno por video (analizado o reutilizado).
         """
         lista = [Path(v) for v in videos]
         salida = Path(carpeta_salida)
         salida.mkdir(parents=True, exist_ok=True)
         miniaturas = salida / "miniaturas"
 
+        registro_previo: Optional[manifiesto.Manifiesto] = None
+        huella = manifiesto.huella_config(asdict(self.config))
+        if incremental:
+            registro_previo = manifiesto.Manifiesto(
+                salida / manifiesto.NOMBRE_MANIFIESTO
+            )
+
         self._log(f"Acelerador: {self.acelerador} (device={self.dispositivo})")
         self._log(f"Videos a analizar: {len(lista)}")
 
         resultados: list[ResultadoVideo] = []
+        reutilizados = 0
         try:
             for i, video in enumerate(lista):
                 self._comprobar_cancelacion()
-                self._log(f"[{i + 1}/{len(lista)}] {video.name}")
                 peso = (i / len(lista), 1 / len(lista))
+
+                previo = (
+                    registro_previo.buscar(video, huella)
+                    if registro_previo is not None
+                    else None
+                )
+                if previo is not None:
+                    resultado = ResultadoVideo.desde_dict(previo)
+                    reutilizados += 1
+                    self._log(
+                        f"[{i + 1}/{len(lista)}] {video.name} — ya analizado, "
+                        f"se reutiliza ({len(resultado.eventos)} eventos)"
+                    )
+                    for evento in resultado.eventos:
+                        if self._on_evento is not None:
+                            self._on_evento(evento)
+                    self._progreso(video.name, 100.0, (peso[0] + peso[1]) * 100.0)
+                    resultados.append(resultado)
+                    continue
+
+                self._log(f"[{i + 1}/{len(lista)}] {video.name}")
                 resultado = self.analizar_video(video, miniaturas, peso)
                 if resultado.error:
                     self._log(f"  ERROR: {resultado.error}")
+                elif resultado.frames_omitidos:
+                    self._log(
+                        f"  {resultado.frames_analizados} frames analizados, "
+                        f"{resultado.frames_omitidos} omitidos sin movimiento "
+                        f"({resultado.ahorro_movimiento:.0%} de ahorro)"
+                    )
                 resultados.append(resultado)
+                # Los videos con error no se apuntan: la próxima vez se reintentan.
+                if registro_previo is not None and not resultado.error:
+                    registro_previo.registrar(video, huella, resultado.a_dict())
         except AnalisisCancelado:
             self._log("Análisis cancelado por el usuario.")
 
+        if reutilizados:
+            self._log(
+                f"Reutilizados {reutilizados} de {len(lista)} videos ya analizados."
+            )
         self.escribir_csv(resultados, salida / "eventos.csv")
         return resultados
 
@@ -1453,6 +1901,8 @@ class AnalizadorPuerta:
                     "duracion_segundos",
                     "rostros",
                     "personas",
+                    "personas_distintas",
+                    "direccion",
                 ],
             )
             escritor.writeheader()

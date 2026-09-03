@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Solo necesario para generar el ejecutable con build_exe.py.
+pyinstaller>=6.0
+
+# Tests: python -m pytest
+pytest>=8.0

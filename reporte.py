@@ -38,6 +38,8 @@ class ResumenInforme:
     duracion_zona: float
     eventos_con_rostro: int
     personas: list[str]
+    #: Suma de personas distintas de los eventos en la zona.
+    personas_zona: int = 0
 
     @classmethod
     def desde(cls, resultados: Sequence[ResultadoVideo]) -> "ResumenInforme":
@@ -55,6 +57,7 @@ class ResumenInforme:
             duracion_zona=sum(e.duracion for e in zona),
             eventos_con_rostro=sum(1 for e in eventos if e.rostros > 0),
             personas=sorted(personas),
+            personas_zona=sum(e.n_personas for e in zona),
         )
 
 
@@ -79,6 +82,10 @@ def _parametros(config: ConfiguracionAnalisis) -> list[tuple[str, str]]:
         ("Tolerancia de agrupación", f"{config.tolerancia_segundos:g} s"),
         ("Modelo", config.modelo),
         ("Confianza mínima", f"{config.confianza:g}"),
+        (
+            "Seguimiento de personas",
+            "ByteTrack" if config.usar_tracking else "desactivado",
+        ),
     ]
     if config.criterio_zona == "solape":
         filas.insert(2, ("Solape mínimo", f"{config.min_solape:.0%}"))
@@ -146,9 +153,12 @@ def _tabla_eventos_html(eventos: Sequence[Evento], con_personas: bool) -> str:
     """Construye la tabla HTML de eventos."""
     if not eventos:
         return '<p class="vacio">Sin eventos.</p>'
-    cabeceras = ["Archivo", "Tipo", "Inicio", "Fin", "Duración", "Rostros"]
+    cabeceras = [
+        "Archivo", "Tipo", "Inicio", "Fin", "Duración", "Personas", "Dirección", "Rostros",
+    ]
     if con_personas:
-        cabeceras.append("Personas")
+        cabeceras.append("Reconocidas")
+    numericas = ("Inicio", "Fin", "Duración", "Personas", "Rostros")
     filas = []
     for e in eventos:
         celdas = [
@@ -157,14 +167,15 @@ def _tabla_eventos_html(eventos: Sequence[Evento], con_personas: bool) -> str:
             f"<td class='num'>{formatear_tiempo(e.inicio)}</td>",
             f"<td class='num'>{formatear_tiempo(e.fin)}</td>",
             f"<td class='num'>{e.duracion:.1f} s</td>",
+            f"<td class='num'>{e.n_personas or ''}</td>",
+            f"<td>{html.escape(e.direccion)}</td>",
             f"<td class='num'>{e.rostros or ''}</td>",
         ]
         if con_personas:
             celdas.append(f"<td>{html.escape(e.personas)}</td>")
         filas.append("<tr>" + "".join(celdas) + "</tr>")
     cab = "".join(
-        f"<th class='num'>{c}</th>" if c in ("Inicio", "Fin", "Duración", "Rostros")
-        else f"<th>{c}</th>"
+        f"<th class='num'>{c}</th>" if c in numericas else f"<th>{c}</th>"
         for c in cabeceras
     )
     return f"<table><thead><tr>{cab}</tr></thead><tbody>{''.join(filas)}</tbody></table>"
@@ -196,6 +207,7 @@ def generar_html(
 
     tarjetas = [
         ("Eventos en la zona", str(resumen.eventos_zona)),
+        ("Personas en la zona", str(resumen.personas_zona)),
         ("Detecciones generales", str(resumen.eventos_general)),
         ("Tiempo total en la zona", _duracion_larga(resumen.duracion_zona)),
         ("Videos analizados", str(resumen.videos)),
@@ -378,6 +390,7 @@ def generar_pdf(
         ["Eventos en la zona", str(resumen.eventos_zona)],
         ["Detecciones generales", str(resumen.eventos_general)],
         ["Tiempo total en la zona", _duracion_larga(resumen.duracion_zona)],
+        ["Personas en la zona", str(resumen.personas_zona)],
         ["Videos analizados", str(resumen.videos)],
     ]
     if resumen.videos_con_error:
@@ -417,11 +430,13 @@ def generar_pdf(
         if not del_tipo:
             hist.append(Paragraph("Sin eventos.", estilo_celda))
             continue
-        cab = ["Archivo", "Inicio", "Fin", "Dur.", "Rostros"]
-        anchos = [72 * mm, 22 * mm, 22 * mm, 20 * mm, 18 * mm]
+        cab = ["Archivo", "Inicio", "Fin", "Dur.", "Pers.", "Dirección", "Rostros"]
+        anchos = [48 * mm, 19 * mm, 19 * mm, 15 * mm, 13 * mm, 26 * mm, 14 * mm]
         if con_personas:
-            cab.append("Personas")
-            anchos = [52 * mm, 20 * mm, 20 * mm, 18 * mm, 16 * mm, 39 * mm]
+            cab.append("Reconocidas")
+            anchos = [
+                38 * mm, 18 * mm, 18 * mm, 13 * mm, 12 * mm, 22 * mm, 13 * mm, 20 * mm,
+            ]
         filas = [cab]
         for e in del_tipo:
             fila = [
@@ -429,6 +444,8 @@ def generar_pdf(
                 formatear_tiempo(e.inicio),
                 formatear_tiempo(e.fin),
                 f"{e.duracion:.0f} s",
+                str(e.n_personas or ""),
+                Paragraph(e.direccion, estilo_celda),
                 str(e.rostros or ""),
             ]
             if con_personas:

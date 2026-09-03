@@ -13,7 +13,7 @@ minuto en arrancar, porque debe descomprimirse en una carpeta temporal.
 from __future__ import annotations
 
 import argparse
-import shutil
+import importlib.metadata
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +25,10 @@ NOMBRE = "DeCam"
 # PyInstaller por sí solo y hay que arrastrar completos.
 PAQUETES_COMPLETOS = ("ultralytics", "cv2", "openvino")
 
-# Paquetes cuyos metadatos consulta ultralytics en tiempo de ejecución.
+# Paquetes cuyos metadatos consulta ultralytics en tiempo de ejecución. No todos
+# están siempre instalados (tqdm, por ejemplo, es opcional según la versión),
+# así que antes de pedirlos se comprueba cuáles existen: PyInstaller aborta la
+# compilación entera si se le pide el metadato de un paquete ausente.
 METADATOS = (
     "ultralytics",
     "torch",
@@ -35,6 +38,15 @@ METADATOS = (
     "pillow",
     "openvino",
 )
+
+
+def paquete_instalado(nombre: str) -> bool:
+    """Indica si un paquete está instalado y tiene metadatos consultables."""
+    try:
+        importlib.metadata.distribution(nombre)
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return True
 
 
 def construir_argumentos(onefile: bool, con_consola: bool) -> list[str]:
@@ -53,8 +65,10 @@ def construir_argumentos(onefile: bool, con_consola: bool) -> list[str]:
 
     for paquete in PAQUETES_COMPLETOS:
         args += ["--collect-all", paquete]
+
     for paquete in METADATOS:
-        args += ["--copy-metadata", paquete]
+        if paquete_instalado(paquete):
+            args += ["--copy-metadata", paquete]
 
     # Los pesos YOLO y el modelo YuNet se incluyen solo si ya están descargados.
     modelos = RAIZ / "models"
@@ -86,12 +100,15 @@ def main() -> int:
     )
     opciones = parser.parse_args()
 
-    if shutil.which("pyinstaller") is None:
-        try:
-            import PyInstaller  # noqa: F401
-        except ImportError:
-            print("Falta PyInstaller. Instálalo con:  pip install pyinstaller")
-            return 1
+    # Se comprueba el módulo, no el ejecutable del PATH: la compilación se lanza
+    # con "python -m PyInstaller", que solo necesita que esté en este intérprete.
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError:
+        print("ERROR: PyInstaller no está instalado en este intérprete.")
+        print(f"  Intérprete: {sys.executable}")
+        print("  Instálalo con:  python -m pip install pyinstaller")
+        return 1
 
     comando = construir_argumentos(opciones.onefile, opciones.console)
     print("Ejecutando:\n  " + " ".join(comando) + "\n")

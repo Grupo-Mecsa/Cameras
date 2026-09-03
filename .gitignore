@@ -48,10 +48,16 @@ catalogo_personas/
 # Guarda rutas absolutas y la zona de la puerta de ESTE equipo.
 config.json
 
+# Registro de la aplicación: en desarrollo se escribe aquí mismo.
+decam.log
+decam.log.*
+
 # ------------------------------------------------------------- Empaquetado
 build/
 dist/
 *.spec
+# Salida de Inno Setup (instalador.iss).
+instalador/
 
 # --------------------------------------------------------------- Editores
 # El resto de .vscode/ (launch, tasks, settings, extensions) sí se versiona:

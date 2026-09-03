@@ -14,6 +14,16 @@
       "problemMatcher": []
     },
     {
+      "label": "DeCam: ejecutar tests",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe -m pytest",
+      "problemMatcher": [],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
       "label": "DeCam: compilar .exe",
       "type": "shell",
       "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe build_exe.py",
